@@ -1,0 +1,5 @@
+-r requirements_dev.txt
+pytest
+pytest-homeassistant-custom-component
+pytest-cov
+pytest-asyncio

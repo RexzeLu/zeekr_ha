@@ -1,0 +1,12 @@
+__pycache__
+pythonenv*
+.python-version
+.coverage
+venv
+.venv
+.cookiecutter.json
+notes
+.devcontainer
+.vscode
+.mypy_cache
+*.bak
