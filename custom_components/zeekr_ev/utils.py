@@ -1,0 +1,138 @@
+import importlib
+import logging
+import re
+from importlib import metadata
+from typing import Dict, Any, Optional
+
+from .const import (
+    CONF_HMAC_ACCESS_KEY,
+    CONF_HMAC_SECRET_KEY,
+    CONF_PASSWORD_PUBLIC_KEY,
+    CONF_PROD_SECRET,
+    CONF_VIN_IV,
+    CONF_VIN_KEY,
+)
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def get_api_version(client: object) -> str | None:
+    """Return the zeekr_ev_api version in use for this coordinator client."""
+    module_name = getattr(client.__class__, "__module__", "")
+
+    if module_name.startswith("custom_components.zeekr_ev_api"):
+        try:
+            local_module = importlib.import_module("custom_components.zeekr_ev_api")
+        except ImportError:
+            return "local"
+        local_version = getattr(local_module, "__version__", None)
+        return f"{local_version} (local)" if local_version else "local"
+
+    try:
+        return metadata.version("zeekr_ev_api")
+    except metadata.PackageNotFoundError:
+        pass
+
+    root_module_name = module_name.rsplit(".", 1)[0] if "." in module_name else module_name
+    if root_module_name:
+        try:
+            root_module = importlib.import_module(root_module_name)
+        except ImportError:
+            return None
+        return getattr(root_module, "__version__", None)
+
+    return None
+
+
+def get_zeekr_client_class(use_local: bool = False):
+    """Dynamically import ZeekrClient from local or installed package."""
+    if use_local:
+        try:
+            module = importlib.import_module("custom_components.zeekr_ev_api.client")
+            _LOGGER.debug("Using local zeekr_ev_api from custom_components")
+            return module.ZeekrClient
+        except ImportError as ex:
+            raise ImportError(
+                "Local zeekr_ev_api not found in custom_components. "
+                "Please install it or disable 'Use local API' option."
+            ) from ex
+
+    # Try to import from installed package (pip)
+    try:
+        module = importlib.import_module("zeekr_ev_api.client")
+        _LOGGER.debug("Using installed zeekr_ev_api package")
+        return module.ZeekrClient
+    except ImportError as ex:
+        raise ImportError(
+            "zeekr_ev_api package not installed. "
+            "Please install it via pip or enable 'Use local API' option."
+        ) from ex
+
+
+def is_base64(s: str) -> bool:
+    """Check if string is base64 encoded."""
+    if not s:
+        return False
+    # Base64 pattern
+    pattern = r"^[A-Za-z0-9+/]*={0,2}$"
+    return bool(re.match(pattern, s)) and (len(s) % 4 == 0)
+
+
+def validate_input(user_input: Dict[str, Any]) -> Optional[str]:
+    """Validate user input format and length."""
+    # Helper to strip and check
+    def check_field(key, min_len=None, exact_len=None):
+        val = user_input.get(key, "").strip()
+        # Update user_input with stripped value
+        user_input[key] = val
+
+        if key not in user_input:
+            return None
+
+        if not val:
+            return None
+
+        if not is_base64(val):
+            return f"invalid_base64_{key}"
+
+        if min_len and len(val) < min_len:
+            return f"invalid_length_min_{min_len}_{key}"
+
+        if exact_len and len(val) != exact_len:
+            return f"invalid_length_exact_{exact_len}_{key}"
+        return None
+
+    # Validate HMAC Access Key (>= 32)
+    if err := check_field(CONF_HMAC_ACCESS_KEY, min_len=32):
+        return err
+
+    # Validate HMAC Secret Key (>= 32)
+    if err := check_field(CONF_HMAC_SECRET_KEY, min_len=32):
+        return err
+
+    # Validate Password Public Key (>= 200)
+    if err := check_field(CONF_PASSWORD_PUBLIC_KEY, min_len=200):
+        return err
+
+    # Validate Prod Secret (Exact 32)
+    if err := check_field(CONF_PROD_SECRET, exact_len=32):
+        return err
+
+    # Validate VIN Key (Exact 16)
+    if err := check_field(CONF_VIN_KEY, exact_len=16):
+        return err
+
+    # Validate VIN IV (Exact 16)
+    if err := check_field(CONF_VIN_IV, exact_len=16):
+        return err
+
+    return None
+
+
+def get_zeekr_sms_client_class():
+    """Import our SMS-based API client."""
+    try:
+        from .api_sms import ZeekrSmsApiClient
+        return ZeekrSmsApiClient
+    except ImportError as ex:
+        raise ImportError("SMS API client not available: api_sms.py missing") from ex

@@ -1,0 +1,50 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "登录方式",
+        "description": "选择 Zeekr 登录方式",
+        "data": {
+          "login_type": "登录方式"
+        }
+      },
+      "sms_phone": {
+        "title": "短信验证码登录",
+        "description": "输入您的手机号码",
+        "data": {
+          "region_code": "国际区号",
+          "phone": "手机号码"
+        }
+      },
+      "sms_code": {
+        "title": "输入验证码",
+        "description": "验证码已发送至 {phone}",
+        "data": {
+          "sms_code": "短信验证码"
+        }
+      },
+      "credentials": {
+        "title": "邮箱密码登录",
+        "data": {
+          "username": "邮箱",
+          "password": "密码",
+          "country_code": "国家代码",
+          "hmac_access_key": "HMAC Access Key（可选）",
+          "hmac_secret_key": "HMAC Secret Key（可选）",
+          "password_public_key": "Password Public Key（可选）",
+          "prod_secret": "Prod Secret（可选）",
+          "vin_key": "VIN Key（可选）",
+          "vin_iv": "VIN IV（可选）"
+        }
+      }
+    },
+    "error": {
+      "send_sms_failed": "发送验证码失败",
+      "login_failed": "登录失败",
+      "invalid_base64": "Base64 格式无效"
+    },
+    "abort": {
+      "already_configured": "已配置"
+    }
+  }
+}

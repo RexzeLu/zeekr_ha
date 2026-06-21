@@ -1,0 +1,93 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Login Method",
+        "description": "Choose how to log in to Zeekr",
+        "data": {
+          "login_type": "Login Method"
+        }
+      },
+      "sms_phone": {
+        "title": "SMS Login",
+        "description": "Enter your phone number",
+        "data": {
+          "region_code": "Region Code",
+          "phone": "Phone Number"
+        }
+      },
+      "sms_code": {
+        "title": "Verify Code",
+        "description": "SMS code sent to {phone}",
+        "data": {
+          "sms_code": "SMS Code"
+        }
+      },
+      "credentials": {
+        "title": "Email Login",
+        "data": {
+          "username": "Email",
+          "password": "Password",
+          "country_code": "Country Code",
+          "hmac_access_key": "HMAC Access Key (optional)",
+          "hmac_secret_key": "HMAC Secret Key (optional)",
+          "password_public_key": "Password Public Key (optional)",
+          "prod_secret": "Prod Secret (optional)",
+          "vin_key": "VIN Key (optional)",
+          "vin_iv": "VIN IV (optional)"
+        }
+      }
+    },
+    "error": {
+      "send_sms_failed": "Failed to send SMS",
+      "login_failed": "Login failed",
+      "invalid_base64": "Invalid Base64 format"
+    },
+    "abort": {
+      "already_configured": "Already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "user": {
+        "title": "Reconfigure Zeekr Account",
+        "description": "Update your Zeekr credentials and integration settings.",
+        "data": {
+          "username": "Username",
+          "password": "Password",
+          "country_code": "Country code",
+          "polling_interval": "Polling interval (minutes)",
+          "hmac_access_key": "HMAC access key",
+          "hmac_secret_key": "HMAC secret key",
+          "password_public_key": "Password public key",
+          "prod_secret": "Prod secret",
+          "vin_key": "VIN key",
+          "vin_iv": "VIN IV",
+          "drive_side": "Drive side",
+          "use_local_api": "Use local API (custom_components/zeekr_ev_api)"
+        },
+        "data_description": {
+          "use_local_api": "Enable to use the local zeekr_ev_api folder from custom_components. Disable to use an installed package (pip)."
+        }
+      }
+    },
+    "error": {
+      "auth": "Username/Password is wrong.",
+      "invalid_base64_hmac_access_key": "HMAC access key must be base64 encoded.",
+      "invalid_length_min_32_hmac_access_key": "HMAC access key must be at least 32 characters.",
+      "invalid_base64_hmac_secret_key": "HMAC secret key must be base64 encoded.",
+      "invalid_length_min_32_hmac_secret_key": "HMAC secret key must be at least 32 characters.",
+      "invalid_base64_password_public_key": "Password public key must be base64 encoded.",
+      "invalid_length_min_200_password_public_key": "Password public key must be at least 200 characters.",
+      "invalid_base64_prod_secret": "Prod secret must be base64 encoded.",
+      "invalid_length_exact_32_prod_secret": "Prod secret must be exactly 32 characters.",
+      "invalid_base64_vin_key": "VIN key must be base64 encoded.",
+      "invalid_length_exact_16_vin_key": "VIN key must be exactly 16 characters.",
+      "invalid_base64_vin_iv": "VIN IV must be base64 encoded.",
+      "invalid_length_exact_16_vin_iv": "VIN IV must be exactly 16 characters."
+    },
+    "abort": {
+      "reconfigure_successful": "Reconfiguration successful."
+    }
+  }
+}
