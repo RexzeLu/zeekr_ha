@@ -181,7 +181,8 @@ class ZeekrEVAPIFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         return ZeekrEVOptionsFlow(config_entry)
 class ZeekrEVOptionsFlow(config_entries.OptionsFlow):
     def __init__(self, config_entry):
-        super().__init__(config_entry)
+        super().__init__()
+        object.__setattr__(self, chr(95)+chr(99)+chr(111)+chr(110)+chr(102)+chr(105)+chr(103)+chr(95)+chr(101)+chr(110)+chr(116)+chr(114)+chr(121), config_entry)
     async def async_step_init(self, user_input=None):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)

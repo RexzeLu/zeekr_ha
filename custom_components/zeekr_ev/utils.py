@@ -1,4 +1,12 @@
 _API_VERSION_CACHE = None
+_API_VERSION_PRELOADED = False
+
+try:
+    from importlib import metadata as _meta
+    _API_VERSION_CACHE = _meta.version("zeekr_ev_api")
+    _API_VERSION_PRELOADED = True
+except Exception:
+    pass
 import importlib
 import logging
 import re
@@ -27,6 +35,9 @@ def get_api_version(client: object) -> str | None:
 
 def _compute_api_version(client):
     """Return the zeekr_ev_api version in use for this coordinator client."""
+    global _API_VERSION_CACHE
+    if _API_VERSION_PRELOADED:
+        return _API_VERSION_CACHE
     module_name = getattr(client.__class__, "__module__", "")
 
     if module_name.startswith("custom_components.zeekr_ev_api"):
@@ -35,10 +46,13 @@ def _compute_api_version(client):
         except ImportError:
             return "local"
         local_version = getattr(local_module, "__version__", None)
-        return f"{local_version} (local)" if local_version else "local"
+        result = f"{local_version} (local)" if local_version else "local"
+        _API_VERSION_CACHE = result
+        return result
 
     try:
-        return metadata.version("zeekr_ev_api")
+        _API_VERSION_CACHE = metadata.version("zeekr_ev_api")
+        return _API_VERSION_CACHE
     except metadata.PackageNotFoundError:
         pass
 
@@ -48,8 +62,11 @@ def _compute_api_version(client):
             root_module = importlib.import_module(root_module_name)
         except ImportError:
             return None
-        return getattr(root_module, "__version__", None)
+        result = getattr(root_module, "__version__", None)
+        _API_VERSION_CACHE = result
+        return result
 
+    _API_VERSION_CACHE = None
     return None
 
 
