@@ -6,7 +6,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from .const import DOMAIN
-from .api_sms import ZeekrSmsApiClient, VehicleWrapper
+from .api_sms import ZeekrSmsApiClient, VehicleWrapper, normalize_vehicle_data
 _LOGGER = logging.getLogger(__name__)
 class ZeekrSmsCoordinator(DataUpdateCoordinator):
     def __init__(self, hass, client, entry):
@@ -17,32 +17,23 @@ class ZeekrSmsCoordinator(DataUpdateCoordinator):
         self._vehicle_data = {}
         self.latest_poll_time = None
     def get_vehicle_by_vin(self, vin):
-        return self.client.get_vehicle_by_vin(vin)
+        """Return a VehicleWrapper with references to client, loop and coordinator."""
+        vw = self.client.get_vehicle_by_vin(vin)
+        if vw:
+            vw._client = self.client
+            vw._loop = self.hass.loop
+            vw._coordinator = self
+        return vw
     async def _async_update_data(self):
         try:
             if not self.vehicles:
-                vins = []
                 try:
                     vlist = await self.client.get_vehicle_list_gw2()
-                    if vlist:
-                        vins = [v.get("vin", v.get("VIN", "")) for v in vlist if v.get("vin") or v.get("VIN")]
-                        _LOGGER.debug("Found %d vehicles via gw2", len(vins))
-                except Exception as exc:
-                    _LOGGER.debug("gw2 vehicle list failed: %s", exc)
-                if not vins:
-                    try:
-                        vlist3 = await self.client.get_vehicle_list_gw3()
-                        if vlist3:
-                            vins = [v.get("vin", v.get("VIN", "")) for v in vlist3 if v.get("vin") or v.get("VIN")]
-                            _LOGGER.debug("Found %d vehicles via gw3", len(vins))
-                    except Exception as exc:
-                        _LOGGER.debug("gw3 vehicle list failed: %s", exc)
-                if vins:
+                    vins = [v.get("vin", v.get("VIN", "")) for v in vlist if v.get("vin") or v.get("VIN")]
                     from .api_sms import VehicleWrapper
-                    self.vehicles = [VehicleWrapper(v) for v in vins]
-                    _LOGGER.info("Found %d vehicle(s): %s", len(self.vehicles), ", ".join(v.vin for v in self.vehicles))
-                else:
-                    _LOGGER.warning("No vehicles found via any gateway")
+                    self.vehicles = [VehicleWrapper(v, client=self.client, loop=self.hass.loop, coordinator=self) for v in vins]
+                except Exception as exc:
+                    _LOGGER.warning("Failed to get vehicle list: %s", exc)
                     return {}
             try:
                 await self.client.refresh_gw2()
@@ -52,66 +43,13 @@ class ZeekrSmsCoordinator(DataUpdateCoordinator):
                 await self.client.snc_refresh()
             except Exception:
                 pass
-            raw_data = await self.client.fetch_status_all()
-            self._vehicle_data = raw_data
-            transformed = {}
-            for vin, vdata in raw_data.items():
-                transformed[vin] = self._transform_vehicle_data(vdata)
+            data = await self.client.fetch_status_all()
+            # Normalize raw GW3/GW2 data to the structure expected by entity platforms
+            normalized = {}
+            for vin, raw in data.items():
+                normalized[vin] = normalize_vehicle_data(raw)
+            self._vehicle_data = normalized
             self.latest_poll_time = datetime.now().isoformat()
-            return transformed
+            return normalized
         except Exception as err:
             raise UpdateFailed(f"Zeekr SMS update failed: {err}") from err
-
-    @staticmethod
-    def _transform_vehicle_data(vdata):
-        # Transform raw API data to match zeekr_ev_api sensor expectations
-        import copy
-        result = {
-            "additionalVehicleStatus": {"electricVehicleStatus": {}, "maintenanceStatus": {}, "climateStatus": {}, "runningStatus": {}},
-            "chargingStatus": {},
-            "vehicleStatus": {},
-        }
-        if not vdata:
-            return result
-        vs = vdata.get("vehicleStatus", vdata)
-        if not isinstance(vs, dict):
-            return result
-        result["vehicleStatus"] = vs
-        evs = result["additionalVehicleStatus"]["electricVehicleStatus"]
-        ms = result["additionalVehicleStatus"]["maintenanceStatus"]
-        cs = result["additionalVehicleStatus"]["climateStatus"]
-        rs = result["additionalVehicleStatus"]["runningStatus"]
-        ch = result["chargingStatus"]
-        for k, v in vs.items():
-            kl = k.lower()
-            if kl in ("batterylevel", "chargelevel", "soc"):
-                evs["chargeLevel"] = v
-            elif kl in ("odometer", "mileage"):
-                ms["odometer"] = v
-            elif kl in ("remainingrange", "estimatedrange", "range"):
-                evs["distanceToEmptyOnBatteryOnly"] = v
-            elif kl in ("insidetemp", "interiortemperature", "cabin_temp"):
-                cs["interiorTemp"] = v
-            elif kl in ("outsidetemp", "exteriortemperature"):
-                result["vehicleStatus"]["outsideTemp"] = v
-            elif kl in ("tripmeter2", "trip2"):
-                rs["tripMeter2"] = v
-            elif kl in ("avgspeed", "average_speed"):
-                rs["avgSpeed"] = v
-            elif kl in ("averpowerconsumption", "avg_consumption"):
-                evs["averPowerConsumption"] = v
-            elif kl in ("chargevoltage", "charging_voltage"):
-                ch["chargeVoltage"] = v
-            elif kl in ("chargecurrent", "charging_current"):
-                ch["chargeCurrent"] = v
-            elif kl in ("chargepower", "charging_power"):
-                ch["chargePower"] = v
-            elif kl in ("chargespeed", "charging_speed"):
-                ch["chargeSpeed"] = v
-            elif "tyre" in kl or "tire" in kl:
-                ms[k] = v
-            elif kl in ("distancetoemptyonbattery20soc", "range_20"):
-                evs["distanceToEmptyOnBattery20Soc"] = v
-            elif kl in ("distancetoemptyonbattery100soc", "range_100"):
-                evs["distanceToEmptyOnBattery100Soc"] = v
-        return result

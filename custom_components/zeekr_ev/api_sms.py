@@ -6,6 +6,8 @@ import json
 import time
 import uuid
 from typing import Any
+import asyncio
+import logging
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 _CA_SECRET = "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCz09z6e9WOcNq+nUMX8Vq1Xe2EmJxuR3XbtureDCS90dfkok"
@@ -13,15 +15,83 @@ _LINE_SECRET = "e83a60805fa54de9bdfcb0f2d6bca757"
 _SNC_SECRET = "890efe3207af95348b95f66b2ee7da04"
 _AES_KEY = "a01a6db985a2f5d4"
 _AES_IV = "ed446b8b8845013d"
+_LOGGER = logging.getLogger(__name__)
 def _ts():
     return str(int(time.time() * 1000))
 def _nonce():
     import random as _r
     return _r.randrange(0, 10**8)
 class VehicleWrapper:
-    def __init__(self, vin, data=None):
+    """Wrapper exposing methods expected by entity platforms.
+    Delegates API calls to ZeekrSmsApiClient via HA event loop.
+    """
+
+    def __init__(self, vin, data=None, client=None, loop=None, coordinator=None):
         self.vin = vin
         self.data = data or {}
+        self._client = client
+        self._loop = loop
+        self._coordinator = coordinator
+
+    def _run_async(self, coro):
+        """Run a coroutine in the HA event loop from a sync context."""
+        if self._loop and self._loop.is_running():
+            import concurrent.futures
+            try:
+                return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=30)
+            except concurrent.futures.TimeoutError:
+                _LOGGER.warning("VehicleWrapper: API call timed out for %s", self.vin)
+                return {"error": "timeout"}
+        try:
+            return asyncio.get_event_loop().run_until_complete(coro)
+        except RuntimeError:
+            return asyncio.new_event_loop().run_until_complete(coro)
+
+    def do_remote_control(self, command, service_id, setting):
+        """Send a remote control command (sync wrapper)."""
+        if not self._client:
+            return {"error": "no client"}
+        return self._run_async(self._client.async_do_remote_control(self.vin, command, service_id, setting))
+
+    def get_status(self):
+        if self._coordinator:
+            return self._coordinator.data.get(self.vin, {})
+        return {}
+
+    def get_charging_status(self):
+        if not self._client:
+            return {}
+        return self._run_async(self._client.async_get_charging_status(self.vin))
+
+    def get_charging_limit(self):
+        if not self._client:
+            return {}
+        return self._run_async(self._client.async_get_charging_limit(self.vin))
+
+    def get_charge_plan(self):
+        if self._coordinator:
+            return self._coordinator.data.get(self.vin, {}).get("chargePlan", {})
+        return {}
+
+    def get_travel_plan(self):
+        if self._coordinator:
+            return self._coordinator.data.get(self.vin, {}).get("travelPlan", {})
+        return {}
+
+    def get_journey_log(self, page_size=50):
+        if not self._client:
+            return []
+        return self._run_async(self._client.async_get_journey_log(self.vin, page_size))
+
+    def set_charge_plan(self, start_time, end_time, command, bc_cycle=False, bc_temp=False):
+        if not self._client:
+            return
+        self._run_async(self._client.async_set_charge_plan(self.vin, start_time, end_time, command, bc_cycle, bc_temp))
+
+    def set_travel_plan(self, command, start_time, scheduled_time, ac_preconditioning=True, steering_wheel_heating=False):
+        if not self._client:
+            return
+        self._run_async(self._client.async_set_travel_plan(self.vin, command, start_time, scheduled_time, ac_preconditioning, steering_wheel_heating))
 class ZeekrSmsApiClient:
     def __init__(self, session):
         self._session = session
@@ -209,6 +279,148 @@ class ZeekrSmsApiClient:
                                   extra={"X-VIN": evin, "X-APP-ID": "ZEEKRCNCH001M0001",
                                          "Authorization": self._new_access_token or ""})
         return result.get("data", {})
+
+
+    # ------------------------------------------------------------------
+    # Remote control via GW3 (SNCTSP gateway)
+    # ------------------------------------------------------------------
+
+    async def async_do_remote_control(self, vin, command, service_id, setting):
+        """Send a remote control command via SNCTSP (GW3) gateway."""
+        evin = self._encrypt_vin(vin)
+        payload = {
+            "command": command,
+            "serviceId": service_id,
+            "serviceParameters": setting.get("serviceParameters", []),
+        }
+        try:
+            result = await self._gw3(
+                "POST",
+                "/ms-vehicle-control/api/v1.0/vehicle/control",
+                payload=payload,
+                extra={
+                    "X-VIN": evin,
+                    "X-APP-ID": "ZEEKRCNCH001M0001",
+                    "Authorization": self._new_access_token or "",
+                },
+            )
+            if result.get("code") != "000000":
+                _LOGGER.warning(
+                    "Remote control %s/%s returned %s: %s",
+                    service_id, command, result.get("code"), result.get("msg"),
+                )
+            return result
+        except Exception as exc:
+            _LOGGER.error("Remote control %s/%s failed: %s", service_id, command, exc)
+            return {"error": str(exc)}
+
+    async def async_get_charging_status(self, vin):
+        """Fetch charging status via GW3."""
+        evin = self._encrypt_vin(vin)
+        try:
+            result = await self._gw3(
+                "GET",
+                "/ms-vehicle-status/api/v1.0/vehicle/charging/status",
+                params={"latest": "true"},
+                extra={
+                    "X-VIN": evin,
+                    "X-APP-ID": "ZEEKRCNCH001M0001",
+                    "Authorization": self._new_access_token or "",
+                },
+            )
+            return result.get("data", {})
+        except Exception as exc:
+            _LOGGER.debug("Failed to fetch charging status for %s: %s", vin, exc)
+            return {}
+
+    async def async_get_charging_limit(self, vin):
+        """Fetch charging limit via GW3."""
+        evin = self._encrypt_vin(vin)
+        try:
+            result = await self._gw3(
+                "GET",
+                "/ms-vehicle-status/api/v1.0/vehicle/charging/limit",
+                extra={
+                    "X-VIN": evin,
+                    "X-APP-ID": "ZEEKRCNCH001M0001",
+                    "Authorization": self._new_access_token or "",
+                },
+            )
+            return result.get("data", {})
+        except Exception as exc:
+            _LOGGER.debug("Failed to fetch charging limit for %s: %s", vin, exc)
+            return {}
+
+    async def async_get_journey_log(self, vin, page_size=50):
+        """Fetch journey log via GW3 BFF."""
+        evin = self._encrypt_vin(vin)
+        try:
+            result = await self._gw3(
+                "POST",
+                "/ms-app-bff/api/v3.0/veh/journey/log",
+                payload={"vin": vin, "pageSize": page_size, "loginDeviceType": 1},
+                extra={
+                    "X-VIN": evin,
+                    "X-APP-ID": "ZEEKRCNCH001M0001",
+                    "Authorization": self._new_access_token or "",
+                },
+            )
+            return result.get("data", {})
+        except Exception as exc:
+            _LOGGER.debug("Failed to fetch journey log for %s: %s", vin, exc)
+            return {}
+
+    async def async_set_charge_plan(self, vin, start_time, end_time, command, bc_cycle=False, bc_temp=False):
+        """Set charging plan schedule via GW3."""
+        evin = self._encrypt_vin(vin)
+        payload = {
+            "command": command,
+            "startTime": start_time,
+            "endTime": end_time,
+            "bcCycleActive": bc_cycle,
+            "bcTempActive": bc_temp,
+        }
+        try:
+            result = await self._gw3(
+                "POST",
+                "/ms-app-bff/api/v3.0/veh/charge/plan",
+                payload=payload,
+                extra={
+                    "X-VIN": evin,
+                    "X-APP-ID": "ZEEKRCNCH001M0001",
+                    "Authorization": self._new_access_token or "",
+                },
+            )
+            return result
+        except Exception as exc:
+            _LOGGER.error("Failed to set charge plan for %s: %s", vin, exc)
+            return {"error": str(exc)}
+
+    async def async_set_travel_plan(self, vin, command, start_time, scheduled_time, ac_preconditioning=True, steering_wheel_heating=False):
+        """Set travel/departure plan via GW3."""
+        evin = self._encrypt_vin(vin)
+        payload = {
+            "command": command,
+            "startTime": start_time,
+            "scheduledTime": scheduled_time,
+            "ac": "true" if ac_preconditioning else "false",
+            "bw": "1" if steering_wheel_heating else "0",
+        }
+        try:
+            result = await self._gw3(
+                "POST",
+                "/ms-app-bff/api/v3.0/veh/travel/plan",
+                payload=payload,
+                extra={
+                    "X-VIN": evin,
+                    "X-APP-ID": "ZEEKRCNCH001M0001",
+                    "Authorization": self._new_access_token or "",
+                },
+            )
+            return result
+        except Exception as exc:
+            _LOGGER.error("Failed to set travel plan for %s: %s", vin, exc)
+            return {"error": str(exc)}
     async def full_login(self, phone, sms_code, region="+86"):
         result = {}
         r1 = await self.sms_login(phone, sms_code, region)
@@ -268,19 +480,207 @@ class ZeekrSmsApiClient:
             if not v.vin:
                 continue
             try:
-                sd = await self.get_vehicle_status_gw2(v.vin)
+                sd = await self.get_vehicle_status_gw3(v.vin)
                 if sd:
-                    data[v.vin] = {"vehicleStatus": sd}
+                    data[v.vin] = sd
                     continue
             except Exception:
                 pass
             try:
-                sd = await self.get_vehicle_status_gw3(v.vin)
+                sd = await self.get_vehicle_status_gw2(v.vin)
                 if sd:
-                    data[v.vin] = sd
+                    data[v.vin] = {"vehicleStatus": sd}
             except Exception:
                 pass
         self._vehicle_data = data
         return data
     def get_status_data(self):
         return self._vehicle_data
+
+
+
+# ------------------------------------------------------------------
+# Data normalization: map raw GW3/GW2 fields to expected entity format
+# ------------------------------------------------------------------
+
+
+def _map_ev_status(raw, target):
+    """Map electric-vehicle status fields from GW3 -> expected names."""
+    mapping = {
+        "soc": "chargeLevel",
+        "remainKm": "distanceToEmptyOnBatteryOnly",
+        "mileage": "distanceToEmptyOnBatteryOnly",
+        "mileageAt20Soc": "distanceToEmptyOnBattery20Soc",
+        "mileageAt80Soc": "distanceToEmptyOnBattery100Soc",
+        "mileageAt100Soc": "distanceToEmptyOnBattery100Soc",
+        "remainingChargeTime": "timeToFullyCharged",
+        "chargeStatus": "chargerState",
+        "chargePlugStatus": "statusOfChargerConnection",
+        "averPowerConsumption": "averPowerConsumption",
+        "tripMeter2": "tripMeter2",
+        "avgSpeed": "avgSpeed",
+        "batteryLevel": "chargeLevel",
+        "range": "distanceToEmptyOnBatteryOnly",
+        "chargerState": "chargerState",
+        "statusOfChargerConnection": "statusOfChargerConnection",
+    }
+    for raw_key, target_key in mapping.items():
+        if raw_key in raw and raw[raw_key] is not None:
+            target[target_key] = raw[raw_key]
+
+
+_TYRE_POS_MAP = {
+    "FL": "Driver",
+    "FR": "Passenger",
+    "RL": "DriverRear",
+    "RR": "PassengerRear",
+}
+
+
+def _map_tyre_fields(raw, target, prefix, suffix, target_prefix):
+    """Map tyre pressure/temp fields with various naming conventions."""
+    for pos_suffix, target_pos in _TYRE_POS_MAP.items():
+        for sep in ["", "_", "-"]:
+            key = f"{prefix}{sep}{pos_suffix}{suffix}"
+            if key in raw and raw[key] is not None:
+                target[f"{target_prefix}{target_pos}"] = raw[key]
+                break
+    for pos in ["Driver", "Passenger", "DriverRear", "PassengerRear"]:
+        for sep in ["", "_", "-"]:
+            key = f"{prefix}{sep}{pos}{suffix}"
+            if key in raw and raw[key] is not None:
+                target[f"{target_prefix}{pos}"] = raw[key]
+                return
+    plain_key = prefix + suffix
+    if plain_key in raw and raw[plain_key] is not None:
+        val = raw[plain_key]
+        for pos in ["Driver", "Passenger", "DriverRear", "PassengerRear"]:
+            target[f"{target_prefix}{pos}"] = val
+
+
+def _map_door_fields(raw, target, prefix, target_prefix):
+    """Map door-related status fields."""
+    for pos_suffix, target_pos in _TYRE_POS_MAP.items():
+        for sep in ["", "_"]:
+            key = f"{prefix}{sep}{pos_suffix}"
+            if key in raw and raw[key] is not None:
+                target[f"{target_prefix}{target_pos}"] = raw[key]
+                break
+    for pos in ["Driver", "Passenger", "DriverRear", "PassengerRear"]:
+        for sep in ["", "_"]:
+            key = f"{prefix}{sep}{pos}"
+            if key in raw and raw[key] is not None:
+                target[f"{target_prefix}{pos}"] = raw[key]
+                return
+
+
+def normalize_vehicle_data(raw_data):
+    """Normalize raw GW3/GW2 vehicle status data to the format expected by entity platforms.
+
+    The entity platforms (sensor, binary_sensor, lock, etc.) expect data structured
+    like what the zeekr_ev_api (email login) library returns.  This function adapts
+    the SNCTSP / LINE gateway raw fields to that structure.
+    """
+    if not raw_data:
+        return raw_data or {}
+
+    if any(k in raw_data for k in ("additionalVehicleStatus", "basicVehicleStatus")):
+        return raw_data
+
+    n = {}
+    avs = {}
+    n["additionalVehicleStatus"] = avs
+
+    evs = {}
+    avs["electricVehicleStatus"] = evs
+    _map_ev_status(raw_data, evs)
+
+    ms = {}
+    avs["maintenanceStatus"] = ms
+    for raw_key in ("totalOdometer", "odometer", "totalMileage"):
+        if raw_key in raw_data and raw_data[raw_key] is not None:
+            ms["odometer"] = raw_data[raw_key]
+            break
+    _map_tyre_fields(raw_data, ms, "tyrePressure", "", "tyreStatus")
+    _map_tyre_fields(raw_data, ms, "tyreTemp", "", "tyreTemp")
+    _map_tyre_fields(raw_data, ms, "tyrePreWarning", "", "tyrePreWarning")
+    _map_tyre_fields(raw_data, ms, "tyreTempWarning", "", "tyreTempWarning")
+    _map_tyre_fields(raw_data, ms, "tyreStatus", "", "tyreStatus")
+    _map_tyre_fields(raw_data, ms, "tyreTemp", "", "tyreTemp")
+
+    cs = {}
+    avs["climateStatus"] = cs
+    for raw_key in ("temperatureInside", "interiorTemp", "cabinTemp", "insideTemp"):
+        if raw_key in raw_data and raw_data[raw_key] is not None:
+            cs["interiorTemp"] = raw_data[raw_key]
+            break
+    if "acStatus" in raw_data:
+        cs["preClimateActive"] = str(raw_data["acStatus"])
+    elif "acOn" in raw_data:
+        cs["preClimateActive"] = "1" if raw_data["acOn"] else "0"
+    elif "preClimateActive" in raw_data:
+        cs["preClimateActive"] = raw_data["preClimateActive"]
+    for raw_key in ("steerWhlHeatingSts",):
+        if raw_key in raw_data:
+            cs[raw_key] = raw_data[raw_key]
+    for raw_key in ("curtainOpenStatus", "curtainPos"):
+        if raw_key in raw_data:
+            cs[raw_key] = raw_data[raw_key]
+    _map_door_fields(raw_data, cs, "winStatus", "winStatus")
+    _map_door_fields(raw_data, cs, "winPos", "winPos")
+
+    dss = {}
+    avs["drivingSafetyStatus"] = dss
+    for raw_key in ("lockStatus", "centralLockingStatus", "doorLockStatus"):
+        if raw_key in raw_data and raw_data[raw_key] is not None:
+            dss["centralLockingStatus"] = str(raw_data[raw_key])
+            break
+    _map_door_fields(raw_data, dss, "doorLockStatus", "doorLockStatus")
+    _map_door_fields(raw_data, dss, "doorOpenStatus", "doorOpenStatus")
+    for raw_key, target_key in (
+        ("trunkStatus", "trunkOpenStatus"),
+        ("trunkOpenStatus", "trunkOpenStatus"),
+        ("hoodStatus", "engineHoodOpenStatus"),
+        ("engineHoodOpenStatus", "engineHoodOpenStatus"),
+        ("parkBrakeStatus", "electricParkBrakeStatus"),
+        ("electricParkBrakeStatus", "electricParkBrakeStatus"),
+        ("chargeLidStatus", "chargeLidDcAcStatus"),
+        ("chargeLidDcAcStatus", "chargeLidDcAcStatus"),
+    ):
+        if raw_key in raw_data and raw_data[raw_key] is not None:
+            dss[target_key] = str(raw_data[raw_key])
+
+    rs = {}
+    avs["runningStatus"] = rs
+    for raw_key in ("tripMeter2", "avgSpeed", "averPowerConsumption"):
+        if raw_key in raw_data:
+            rs[raw_key] = raw_data[raw_key]
+
+    rcs = {}
+    avs["remoteControlState"] = rcs
+    for raw_key in ("vstdModeState",):
+        if raw_key in raw_data:
+            rcs[raw_key] = raw_data[raw_key]
+
+    bvs = {}
+    n["basicVehicleStatus"] = bvs
+    for raw_key, target_key in (
+        ("vehicleState", "usageMode"),
+        ("usageMode", "usageMode"),
+        ("drivingState", "engineStatus"),
+        ("engineStatus", "engineStatus"),
+    ):
+        if raw_key in raw_data and raw_data[raw_key] is not None:
+            bvs[target_key] = str(raw_data[raw_key])
+
+    chs = {}
+    n["chargingStatus"] = chs
+    for raw_key in ("chargeVoltage", "chargeCurrent", "chargePower", "chargeSpeed"):
+        if raw_key in raw_data:
+            chs[raw_key] = raw_data[raw_key]
+    if "bmsChargeVoltage" in raw_data:
+        chs["chargeVoltage"] = raw_data["bmsChargeVoltage"]
+    if "bmsChargeCurrent" in raw_data:
+        chs["chargeCurrent"] = raw_data["bmsChargeCurrent"]
+
+    return n
