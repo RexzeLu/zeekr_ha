@@ -1,3 +1,4 @@
+_API_VERSION_CACHE = None
 import importlib
 import logging
 import re
@@ -17,6 +18,14 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def get_api_version(client: object) -> str | None:
+    global _API_VERSION_CACHE
+    if _API_VERSION_CACHE is not None:
+        return _API_VERSION_CACHE
+    _API_VERSION_CACHE = _compute_api_version(client)
+    return _API_VERSION_CACHE
+
+
+def _compute_api_version(client):
     """Return the zeekr_ev_api version in use for this coordinator client."""
     module_name = getattr(client.__class__, "__module__", "")
 

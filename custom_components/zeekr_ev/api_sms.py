@@ -246,6 +246,15 @@ class ZeekrSmsApiClient:
     def region_code(self):
         return "+86"
 
+
+    @property
+    def vin_key(self):
+        return _AES_KEY
+
+    @property
+    def vin_iv(self):
+        return _AES_IV
+
     def get_vehicle_list(self):
         return self._vehicles
     def get_vehicle_by_vin(self, vin):
