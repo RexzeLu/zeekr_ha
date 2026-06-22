@@ -14,5 +14,5 @@
     "zeekr_ev_api>=0.1.12",
     "pycryptodome>=3.20.0"
   ],
-  "version": "0.2.0"
+  "version": "v0.2.0"
 }
