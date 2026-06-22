@@ -37,9 +37,66 @@ class ZeekrSmsCoordinator(DataUpdateCoordinator):
                 await self.client.snc_refresh()
             except Exception:
                 pass
-            data = await self.client.fetch_status_all()
-            self._vehicle_data = data
+            raw_data = await self.client.fetch_status_all()
+            self._vehicle_data = raw_data
+            transformed = {}
+            for vin, vdata in raw_data.items():
+                transformed[vin] = self._transform_vehicle_data(vdata)
             self.latest_poll_time = datetime.now().isoformat()
-            return data
+            return transformed
         except Exception as err:
             raise UpdateFailed(f"Zeekr SMS update failed: {err}") from err
+
+    @staticmethod
+    def _transform_vehicle_data(vdata):
+        # Transform raw API data to match zeekr_ev_api sensor expectations
+        import copy
+        result = {
+            "additionalVehicleStatus": {"electricVehicleStatus": {}, "maintenanceStatus": {}, "climateStatus": {}, "runningStatus": {}},
+            "chargingStatus": {},
+            "vehicleStatus": {},
+        }
+        if not vdata:
+            return result
+        vs = vdata.get("vehicleStatus", vdata)
+        if not isinstance(vs, dict):
+            return result
+        result["vehicleStatus"] = vs
+        evs = result["additionalVehicleStatus"]["electricVehicleStatus"]
+        ms = result["additionalVehicleStatus"]["maintenanceStatus"]
+        cs = result["additionalVehicleStatus"]["climateStatus"]
+        rs = result["additionalVehicleStatus"]["runningStatus"]
+        ch = result["chargingStatus"]
+        for k, v in vs.items():
+            kl = k.lower()
+            if kl in ("batterylevel", "chargelevel", "soc"):
+                evs["chargeLevel"] = v
+            elif kl in ("odometer", "mileage"):
+                ms["odometer"] = v
+            elif kl in ("remainingrange", "estimatedrange", "range"):
+                evs["distanceToEmptyOnBatteryOnly"] = v
+            elif kl in ("insidetemp", "interiortemperature", "cabin_temp"):
+                cs["interiorTemp"] = v
+            elif kl in ("outsidetemp", "exteriortemperature"):
+                result["vehicleStatus"]["outsideTemp"] = v
+            elif kl in ("tripmeter2", "trip2"):
+                rs["tripMeter2"] = v
+            elif kl in ("avgspeed", "average_speed"):
+                rs["avgSpeed"] = v
+            elif kl in ("averpowerconsumption", "avg_consumption"):
+                evs["averPowerConsumption"] = v
+            elif kl in ("chargevoltage", "charging_voltage"):
+                ch["chargeVoltage"] = v
+            elif kl in ("chargecurrent", "charging_current"):
+                ch["chargeCurrent"] = v
+            elif kl in ("chargepower", "charging_power"):
+                ch["chargePower"] = v
+            elif kl in ("chargespeed", "charging_speed"):
+                ch["chargeSpeed"] = v
+            elif "tyre" in kl or "tire" in kl:
+                ms[k] = v
+            elif kl in ("distancetoemptyonbattery20soc", "range_20"):
+                evs["distanceToEmptyOnBattery20Soc"] = v
+            elif kl in ("distancetoemptyonbattery100soc", "range_100"):
+                evs["distanceToEmptyOnBattery100Soc"] = v
+        return result

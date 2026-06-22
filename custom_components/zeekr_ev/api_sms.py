@@ -268,16 +268,16 @@ class ZeekrSmsApiClient:
             if not v.vin:
                 continue
             try:
-                sd = await self.get_vehicle_status_gw3(v.vin)
+                sd = await self.get_vehicle_status_gw2(v.vin)
                 if sd:
-                    data[v.vin] = sd
+                    data[v.vin] = {"vehicleStatus": sd}
                     continue
             except Exception:
                 pass
             try:
-                sd = await self.get_vehicle_status_gw2(v.vin)
+                sd = await self.get_vehicle_status_gw3(v.vin)
                 if sd:
-                    data[v.vin] = {"vehicleStatus": sd}
+                    data[v.vin] = sd
             except Exception:
                 pass
         self._vehicle_data = data
