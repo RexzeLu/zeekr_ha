@@ -21,13 +21,28 @@ class ZeekrSmsCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self):
         try:
             if not self.vehicles:
+                vins = []
                 try:
                     vlist = await self.client.get_vehicle_list_gw2()
-                    vins = [v.get("vin", v.get("VIN", "")) for v in vlist if v.get("vin") or v.get("VIN")]
+                    if vlist:
+                        vins = [v.get("vin", v.get("VIN", "")) for v in vlist if v.get("vin") or v.get("VIN")]
+                        _LOGGER.debug("Found %d vehicles via gw2", len(vins))
+                except Exception as exc:
+                    _LOGGER.debug("gw2 vehicle list failed: %s", exc)
+                if not vins:
+                    try:
+                        vlist3 = await self.client.get_vehicle_list_gw3()
+                        if vlist3:
+                            vins = [v.get("vin", v.get("VIN", "")) for v in vlist3 if v.get("vin") or v.get("VIN")]
+                            _LOGGER.debug("Found %d vehicles via gw3", len(vins))
+                    except Exception as exc:
+                        _LOGGER.debug("gw3 vehicle list failed: %s", exc)
+                if vins:
                     from .api_sms import VehicleWrapper
                     self.vehicles = [VehicleWrapper(v) for v in vins]
-                except Exception as exc:
-                    _LOGGER.warning("Failed to get vehicle list: %s", exc)
+                    _LOGGER.info("Found %d vehicle(s): %s", len(self.vehicles), ", ".join(v.vin for v in self.vehicles))
+                else:
+                    _LOGGER.warning("No vehicles found via any gateway")
                     return {}
             try:
                 await self.client.refresh_gw2()

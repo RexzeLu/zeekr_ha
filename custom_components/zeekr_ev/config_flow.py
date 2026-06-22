@@ -93,14 +93,22 @@ class ZeekrEVAPIFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 try:
                     flow_res = await client.full_login(self._phone, sms_code, self._region_code)
                     login_resp = flow_res.get("sms_login", {})
-                    if login_resp.get("code") == "000000":
+                    if login_resp.get("code") != "000000":
+                        msg = login_resp.get("msg", login_resp.get("message", "登录失败"))
+                        self._errors["base"] = f"登录失败: {msg}"
+                    elif "vehicles_gw2" in flow_res or "vehicles_gw3" in flow_res:
+                        tokens = client.get_token_storage()
+                        return self.async_create_entry(
+                            title=f"Zeekr ({self._phone})",
+                            data={CONF_LOGIN_TYPE: LOGIN_TYPE_SMS, CONF_PHONE: self._phone, CONF_REGION_CODE: self._region_code, **tokens})
+                    elif client._jwt_token:
+                        # SMS login ok but got no vehicles - save tokens anyway, coordinator will retry
                         tokens = client.get_token_storage()
                         return self.async_create_entry(
                             title=f"Zeekr ({self._phone})",
                             data={CONF_LOGIN_TYPE: LOGIN_TYPE_SMS, CONF_PHONE: self._phone, CONF_REGION_CODE: self._region_code, **tokens})
                     else:
-                        msg = login_resp.get("msg", login_resp.get("message", "登录失败"))
-                        self._errors["base"] = f"登录失败: {msg}"
+                        self._errors["base"] = "登录失败: 未获取到车辆信息，请重试"
                 except Exception as exc:
                     _LOGGER.exception("SMS login failed")
                     self._errors["base"] = f"登录异常: {exc}"
