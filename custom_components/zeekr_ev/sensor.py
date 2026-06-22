@@ -545,7 +545,7 @@ class ZeekrAPIStatusSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self):
         """Return the state of the sensor."""
-        if self.coordinator.client and self.coordinator.client.logged_in:
+        if self.coordinator.client:
             return "Connected"
         return "Disconnected"
 
@@ -555,7 +555,7 @@ class ZeekrAPIStatusSensor(CoordinatorEntity, SensorEntity):
         attrs = {}
         client = self.coordinator.client
         if client:
-            attrs["logged_in"] = client.logged_in
+            attrs["logged_in"] = getattr(client, "logged_in", None)
             attrs["username"] = getattr(client, "username", None)
             attrs["region_code"] = getattr(client, "region_code", None)
             attrs["app_server_host"] = getattr(client, "app_server_host", None)

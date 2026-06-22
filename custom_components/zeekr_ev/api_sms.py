@@ -233,6 +233,19 @@ class ZeekrSmsApiClient:
         vlist3 = await self.get_vehicle_list_gw3()
         result["vehicles_gw3"] = vlist3
         return result
+
+    @property
+    def logged_in(self):
+        return self._jwt_token is not None
+
+    @property
+    def username(self):
+        return self._device_id[:8] if self._device_id else None
+
+    @property
+    def region_code(self):
+        return "+86"
+
     def get_vehicle_list(self):
         return self._vehicles
     def get_vehicle_by_vin(self, vin):
