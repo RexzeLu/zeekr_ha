@@ -685,19 +685,65 @@ def extract_vehicle_meta(payload: Any) -> dict[str, Any]:
     }
 
 
+# Marketing names for the Zeekr platform codes that show up in ``series``.
+#
+# The vehicle list also carries ``modelName``, but that is the *catalogue trim*
+# and it cannot be trusted: the Guangzhou 极氪 X (a four-seat AWD car) is
+# returned as ``modelName = "四座后驱版-001"`` — the drive type does not even
+# match the actual car.  The platform code is the only label we can rely on
+# offline, so it wins over the trim.  Codes we do not know keep whatever the
+# backend sent, so a new model still shows something sensible.
+_SERIES_DISPLAY_NAMES = {
+    "bx1e": "极氪 X",
+    "dc1e": "极氪 001",
+}
+
+# ``"四座后驱版-001"`` / ``"YOU版-013"`` / ``"X (001)"`` -> drop the trailing
+# catalogue index.  A separator is required so a real name like ``极氪001`` is
+# never mangled.
+_VARIANT_SUFFIX_RE = re.compile(
+    r"(?:\s*[-_·]\s*\d{1,4}|\s*[（(]\s*\d{1,4}\s*[)）])\s*$"
+)
+
+
+def _strip_variant_suffix(value: Any) -> str | None:
+    """Drop the trailing catalogue index from a backend model name."""
+    text = _clean_text(value)
+    if not text:
+        return None
+    stripped = _VARIANT_SUFFIX_RE.sub("", text).strip()
+    return stripped or text
+
+
+def vehicle_series_name(meta: dict[str, Any] | None) -> str | None:
+    """Return the most trustworthy model label we can derive offline.
+
+    Used for the device's *name* and *model*: the platform marketing name when
+    the series code is known, otherwise the backend's trim with its trailing
+    index stripped, otherwise the raw series code.
+    """
+    meta = meta or {}
+    series = _clean_text(meta.get("series"))
+    if series and (known := _SERIES_DISPLAY_NAMES.get(series.lower())):
+        return known
+    return _strip_variant_suffix(meta.get("model")) or series
+
+
 def vehicle_display_name(meta: dict[str, Any] | None) -> str:
     """Pick a human friendly device name for a vehicle.
 
     Order matters: the user's own name for the car wins, then the plate, then
-    the model/series.  Falling back to the VIN is a last resort — it used to be
-    hit for every car without a plate, which is why devices showed up named
-    after their VIN.
+    the platform marketing name / catalogue trim.  Falling back to the VIN is a
+    last resort — it used to be hit for every car without a plate, which is why
+    devices showed up named after their VIN.
     """
     meta = meta or {}
-    for key in ("nickname", "plate", "model", "series"):
+    for key in ("nickname", "plate"):
         value = _clean_text(meta.get(key))
         if value:
             return value
+    if series_name := vehicle_series_name(meta):
+        return series_name
     return _clean_text(meta.get("vin")) or "Zeekr EV"
 
 

@@ -21,7 +21,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import ZeekrCoordinator
-from .parser import vehicle_display_name
+from .parser import vehicle_display_name, vehicle_series_name
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -30,14 +30,21 @@ _MAX_VEHICLES = 20
 
 
 def vehicle_device_info(coordinator: ZeekrCoordinator, vin: str) -> DeviceInfo:
-    """Build the HA device entry for a vehicle."""
+    """Build the HA device entry for a vehicle.
+
+    Both ``name`` and ``model`` come from :func:`vehicle_series_name` so the
+    untrustworthy backend trim (``四座后驱版-001`` for a 四座四驱 car) is not
+    shown twice.  Users can still rename the device in HA — ``name_by_user``
+    wins over whatever we send here.
+    """
     vehicle = coordinator.get_vehicle(vin)
     meta: dict[str, Any] = getattr(vehicle, "meta", None) or {}
+    label = vehicle_series_name(meta)
     return DeviceInfo(
         identifiers={(DOMAIN, vin)},
         name=vehicle_display_name(meta),
         manufacturer=meta.get("brand") or "Zeekr",
-        model=meta.get("model") or meta.get("series") or "Zeekr EV",
+        model=label or "Zeekr EV",
         serial_number=vin,
     )
 

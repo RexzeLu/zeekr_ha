@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import re
 
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import (
+    ConfigEntryError,
     ConfigEntryNotReady,
     HomeAssistantError,
 )
@@ -19,6 +21,8 @@ from .api_sms import ZeekrSmsApiClient
 from .const import (
     ATTR_CONFIG_ENTRY_ID,
     ATTR_VIN,
+    CONF_PHONE,
+    CONF_REGION_CODE,
     DOMAIN,
     PLATFORMS,
     SERVICE_DUMP_RAW,
@@ -32,6 +36,67 @@ _LOGGER = logging.getLogger(__name__)
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
+def _account_key(entry: ConfigEntry) -> str | None:
+    """Return a comparable key for the account behind an entry."""
+    digits = re.sub(r"\D", "", str(entry.data.get(CONF_PHONE) or ""))
+    if not digits:
+        return None
+    region = str(entry.data.get(CONF_REGION_CODE) or "").strip()
+    return f"{region}{digits}"
+
+
+def _async_guard_against_duplicate_account(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Refuse to load a second entry that logs into the same account.
+
+    Two entries for one account publish the exact same entity ``unique_id``s
+    (``{vin}_{key}``) and Home Assistant can only keep one of them: the newer
+    entry's entities are silently dropped ("Platform zeekr_ev does not generate
+    unique IDs") and, once the older entry stops loading, its entities linger as
+    *restored* ones, which the UI renders as ``unavailable``.  That looks like a
+    parser/position bug but is really a duplicate-account problem, so fail with
+    an explicit message instead of half-working.
+    """
+    account = _account_key(entry)
+    if account is None:
+        return
+
+    for other in hass.config_entries.async_entries(DOMAIN):
+        if other.entry_id == entry.entry_id or _account_key(other) != account:
+            continue
+        if other.state is not ConfigEntryState.LOADED:
+            # The other entry is broken/disabled; this one takes over.
+            continue
+        raise ConfigEntryError(
+            "检测到重复的极氪配置项"
+            f"「{other.title}」（{other.entry_id}），它与本配置项登录的是同一个账号。"
+            "两者的实体唯一 ID 会冲突，导致位置等实体长期显示“不可用”。"
+            "请到「设置 → 设备与服务 → 极氪」删除多余的配置项后重启 "
+            "Home Assistant。"
+        )
+
+
+def _async_warn_on_shared_vehicles(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Warn when another account already publishes entities for the same car."""
+    claimed: dict[str, str] = {}
+    for other_id, other in hass.data.get(DOMAIN, {}).items():
+        if other_id == entry.entry_id or not isinstance(other, ZeekrCoordinator):
+            continue
+        for vin in other.vehicle_vins():
+            claimed.setdefault(vin, other_id)
+
+    coordinator: ZeekrCoordinator = hass.data[DOMAIN][entry.entry_id]
+    shared = [vin for vin in coordinator.vehicle_vins() if vin in claimed]
+    if shared:
+        _LOGGER.warning(
+            "车辆 %s 已由另一个极氪配置项（%s）提供实体，本配置项的对应实体会被 "
+            "Home Assistant 忽略。同一辆车只应保留一个配置项。",
+            ", ".join(shared),
+            ", ".join(sorted({claimed[vin] for vin in shared})),
+        )
+
+
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Integration is configured through the UI only."""
     hass.data.setdefault(DOMAIN, {})
@@ -43,6 +108,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
     if hass.data[DOMAIN].get(entry.entry_id) is not None:
         return True
+
+    _async_guard_against_duplicate_account(hass, entry)
 
     _LOGGER.info(STARTUP_MESSAGE)
 
@@ -62,6 +129,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise ConfigEntryNotReady(f"初始化极氪账户失败: {err}") from err
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
+    _async_warn_on_shared_vehicles(hass, entry)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     _async_register_services(hass)

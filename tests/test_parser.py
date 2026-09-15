@@ -311,9 +311,23 @@ def test_vehicle_display_name_priority():
                                         "model": "极氪001"}) == "小白"
     assert parser.vehicle_display_name({"plate": "粤A12345",
                                         "model": "极氪001"}) == "粤A12345"
+    # A known platform code beats the backend trim, which is wrong for real
+    # accounts (a 四座四驱 极氪 X comes back as "四座后驱版-001").
     assert parser.vehicle_display_name({"model": "四座后驱版-001",
-                                        "series": "BX1E"}) == "四座后驱版-001"
-    assert parser.vehicle_display_name({"series": "BX1E"}) == "BX1E"
+                                        "series": "BX1E"}) == "极氪 X"
+    assert parser.vehicle_display_name({"series": "BX1E"}) == "极氪 X"
+    assert parser.vehicle_display_name({"series": "DC1E"}) == "极氪 001"
+
+
+def test_unknown_series_keeps_backend_trim_without_catalogue_index():
+    assert parser.vehicle_series_name({"model": "四座后驱版-001",
+                                       "series": "ZZ9E"}) == "四座后驱版"
+    assert parser.vehicle_series_name({"model": "YOU版-013"}) == "YOU版"
+    assert parser.vehicle_series_name({"model": "X（001）"}) == "X"
+    # A number without a separator is part of the name, not an index.
+    assert parser.vehicle_series_name({"model": "极氪001"}) == "极氪001"
+    assert parser.vehicle_display_name(
+        {"model": "四座后驱版-001", "series": "ZZ9E"}) == "四座后驱版"
 
 
 def test_blank_strings_do_not_shadow_the_vin_fallback():
@@ -332,7 +346,8 @@ def test_extract_vehicle_meta_cleans_blank_fields():
     assert meta["vin"] == "LXXX"
     assert meta["plate"] is None
     assert meta["model"] == "四座后驱版-001"
-    assert parser.vehicle_display_name(meta) == "四座后驱版-001"
+    # No series code to translate, so the trim is used — without its index.
+    assert parser.vehicle_display_name(meta) == "四座后驱版"
 
 
 @pytest.mark.parametrize(
