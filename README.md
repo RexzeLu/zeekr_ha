@@ -11,7 +11,7 @@
 | 平台 | 说明 |
 | --- | --- |
 | `device_tracker` | 车辆位置（GPS 经纬度） |
-| `sensor` | 电量、续航、总里程、车内温度、充电功率/电压/电流、预计充满时间、充电上限、车速、四轮胎压/胎温 |
+| `sensor` | 电量、续航、总里程、车速、平均能耗、车内/车外温度、空调设定温度、充电功率/电压/电流、预计充满时间、充电上限、12V 电瓶电压/电量、车内 PM2.5/湿度、保养剩余里程/天数、四轮胎压/胎温 |
 | `binary_sensor` | 充电中、已插枪、四门/后备箱/前机盖、四车窗、胎压报警 |
 | `lock` | 车门锁、充电口盖 |
 | `switch` | 充电、前风挡除霜、方向盘加热、哨兵模式、充电计划、出行计划、出行空调 |
@@ -67,12 +67,51 @@
 
 网关在不同车型/固件下返回的字段名不一致。本集成使用**容错解析**：
 把报文里所有叶子节点建索引，再按别名表匹配，因此少数字段名变化不会导致整体失效。
+
 如果某些实体仍为未知，按下面步骤导出真实报文反馈：
 
 1. 「设置 → 设备与服务 → 极氪 → 下载诊断信息」，或
 2. 「开发者工具 → 操作 → `zeekr_ev.dump_raw_status`」，复制返回的 JSON
 
-拿到真实报文后，只要在 `custom_components/zeekr_ev/parser.py` 的 `_ALIAS` 表里补上字段名即可。
+诊断文件里的 `payload_summary` 会附带**字段溯源**（每个关键值来自哪个报文路径），
+例如：
+
+```json
+"battery.soc": {
+  "path": "additionalvehiclestatuselectricvehiclestatuschargelevel",
+  "value": "86"
+}
+```
+
+`"path": null` 就说明这条别名没匹配上，照着补 `_ALIAS` 即可。
+诊断文件中的 VIN、车牌等敏感信息请在反馈前自行打码。
+
+### 两辆车 / 多辆车
+
+后端车辆列表里有多少辆车，集成就会建多少套实体（`VehicleEntityManager` 会在轮询
+发现新车辆时自动补建）。实体 id 以 VIN 区分，建议在 HA 里按车牌重命名设备。
+
+## 字段校准状态
+
+下表是依据真实报文（`BX1E` + `DC1E`，HA 2026.1.1）核对过的结论，供后续排查参考：
+
+| 字段 | 结论 |
+| --- | --- |
+| 动力电池 SOC | `electricVehicleStatus.chargeLevel`（**不是** `maintenanceStatus.mainBatteryStatus.chargeLevel`，后者是 12V 电瓶） |
+| 12V 电瓶 | `maintenanceStatus.mainBatteryStatus.chargeLevel` / `.voltage` |
+| 续航 | `electricVehicleStatus.distanceToEmptyOnBatteryOnly` |
+| 胎压 | `maintenanceStatus.tyreStatus{Driver,Passenger,DriverRear,PassengerRear}`，单位 kPa |
+| 坐标量纲 | 定点整数，已实测为「度 × 3,600,000」；解析器会自动探测 3.6e6 / 1e7 / 1e6 / 已是度数四种情况 |
+| 定位可信 | `basicVehicleStatus.position.posCanBeTrusted` |
+| 锁车状态 | `*LockStatus*` 系列：`0` = 未锁，非 `0` = 已锁 |
+| 充电口盖 | `chargeLidAcStatus` / `chargeLidDcAcStatus`：`1` = 打开，`0`/`2` = 关闭 |
+| 预计充满 | `timeToFullyCharged`，空闲时返回哨兵值 `2047`，已按「未知」处理 |
+
+以下字段仅依据空载（未充电 / 未开空调）报文推断，仍待实测确认：
+
+- 充电状态码集合 `_CHARGING_ACTIVE` / `_CHARGING_IDLE`
+- 哨兵模式 `RSM` 的开关取值
+- 遮阳帘 / 天窗位置（实车返回 `101` 与 `*OpenStatus = 1`，暂按「全开」处理）
 
 ### 位置不更新
 

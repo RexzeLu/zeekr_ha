@@ -11,6 +11,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
+    CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
     PERCENTAGE,
     UnitOfElectricCurrent,
     UnitOfElectricPotential,
@@ -31,6 +32,9 @@ from .entity import VehicleEntityManager, ZeekrEntity
 _TYRE_POSITIONS = ("fl", "fr", "rl", "rr")
 _TYRE_LABEL = {"fl": "左前", "fr": "右前", "rl": "左后", "rr": "右后"}
 
+# No standard HA unit for consumption; keep the string the car reports.
+_CONSUMPTION_UNIT = "kWh/100km"
+
 
 @dataclass(frozen=True)
 class SensorSpec:
@@ -43,12 +47,12 @@ class SensorSpec:
     state_class: SensorStateClass | None = None
     unit: str | None = None
     icon: str | None = None
-    icon_on: str | None = None
     divisor: float = 1.0
 
 
 def _build_specs() -> list[SensorSpec]:
     specs: list[SensorSpec] = [
+        # -- drive / energy ---------------------------------------------
         SensorSpec(
             "battery_level", "电量", ("battery", "soc"),
             SensorDeviceClass.BATTERY, SensorStateClass.MEASUREMENT,
@@ -60,25 +64,36 @@ def _build_specs() -> list[SensorSpec]:
             UnitOfLength.KILOMETERS, "mdi:map-marker-distance",
         ),
         SensorSpec(
-            "range_at_20", "20%电量续航", ("battery", "range_at_20"),
-            SensorDeviceClass.DISTANCE, SensorStateClass.MEASUREMENT,
-            UnitOfLength.KILOMETERS, "mdi:map-marker-distance",
-        ),
-        SensorSpec(
-            "range_at_80", "满电续航", ("battery", "range_at_80"),
-            SensorDeviceClass.DISTANCE, SensorStateClass.MEASUREMENT,
-            UnitOfLength.KILOMETERS, "mdi:map-marker-distance",
-        ),
-        SensorSpec(
             "odometer", "总里程", ("odometer",),
             SensorDeviceClass.DISTANCE, SensorStateClass.TOTAL_INCREASING,
             UnitOfLength.KILOMETERS, "mdi:counter",
         ),
         SensorSpec(
+            "speed", "车速", ("safety", "speed"),
+            SensorDeviceClass.SPEED, SensorStateClass.MEASUREMENT,
+            UnitOfSpeed.KILOMETERS_PER_HOUR, "mdi:speedometer",
+        ),
+        SensorSpec(
+            "power_consumption", "平均能耗", ("battery", "power_consumption"),
+            None, None, _CONSUMPTION_UNIT, "mdi:lightning-bolt-outline",
+        ),
+        # -- climate ----------------------------------------------------
+        SensorSpec(
             "inside_temperature", "车内温度", ("climate", "inside_temp"),
             SensorDeviceClass.TEMPERATURE, SensorStateClass.MEASUREMENT,
             UnitOfTemperature.CELSIUS, "mdi:thermometer",
         ),
+        SensorSpec(
+            "outside_temperature", "车外温度", ("climate", "outside_temp"),
+            SensorDeviceClass.TEMPERATURE, SensorStateClass.MEASUREMENT,
+            UnitOfTemperature.CELSIUS, "mdi:thermometer-lines",
+        ),
+        SensorSpec(
+            "climate_target_temperature", "空调设定温度", ("climate", "target_temp"),
+            SensorDeviceClass.TEMPERATURE, SensorStateClass.MEASUREMENT,
+            UnitOfTemperature.CELSIUS, "mdi:thermostat",
+        ),
+        # -- charging ---------------------------------------------------
         SensorSpec(
             "charge_power", "充电功率", ("battery", "power"),
             SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT,
@@ -104,10 +119,37 @@ def _build_specs() -> list[SensorSpec]:
             SensorDeviceClass.BATTERY, None,
             PERCENTAGE, "mdi:battery-charging-high",
         ),
+        # -- 12 V aux battery ------------------------------------------
         SensorSpec(
-            "speed", "车速", ("safety", "speed"),
-            SensorDeviceClass.SPEED, SensorStateClass.MEASUREMENT,
-            UnitOfSpeed.KILOMETERS_PER_HOUR, "mdi:speedometer",
+            "aux_battery_voltage", "12V电瓶电压", ("battery12v", "voltage"),
+            SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT,
+            UnitOfElectricPotential.VOLT, "mdi:car-battery",
+        ),
+        SensorSpec(
+            "aux_battery_level", "12V电瓶电量", ("battery12v", "soc"),
+            None, SensorStateClass.MEASUREMENT,
+            PERCENTAGE, "mdi:car-battery",
+        ),
+        # -- cabin air / service ---------------------------------------
+        SensorSpec(
+            "pm25", "车内PM2.5", ("air", "pm25"),
+            SensorDeviceClass.PM25, SensorStateClass.MEASUREMENT,
+            CONCENTRATION_MICROGRAMS_PER_CUBIC_METER, "mdi:blur",
+        ),
+        SensorSpec(
+            "humidity", "车内湿度", ("air", "humidity"),
+            SensorDeviceClass.HUMIDITY, SensorStateClass.MEASUREMENT,
+            PERCENTAGE, "mdi:water-percent",
+        ),
+        SensorSpec(
+            "service_distance", "保养剩余里程", ("service", "distance_to_service"),
+            SensorDeviceClass.DISTANCE, None,
+            UnitOfLength.KILOMETERS, "mdi:wrench-clock",
+        ),
+        SensorSpec(
+            "service_days", "保养剩余天数", ("service", "days_to_service"),
+            SensorDeviceClass.DURATION, None,
+            UnitOfTime.DAYS, "mdi:calendar-clock",
         ),
     ]
 

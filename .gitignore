@@ -29,5 +29,6 @@ notes/
 /_dump*.json
 /_debug/
 /flows.json
+/config_entry-*.json
 scratch/
 _scratch/
