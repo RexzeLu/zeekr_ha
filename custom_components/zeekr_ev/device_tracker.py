@@ -1,16 +1,17 @@
-"""Device tracker platform for Zeekr EV API Integration."""
+"""Device tracker platform — vehicle GPS position."""
 
 from __future__ import annotations
 
-from homeassistant.components.device_tracker import SourceType
-from homeassistant.components.device_tracker import TrackerEntity
+from typing import Any
+
+from homeassistant.components.device_tracker import SourceType, TrackerEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import ZeekrCoordinator
+from .entity import VehicleEntityManager, ZeekrEntity
 
 
 async def async_setup_entry(
@@ -20,58 +21,56 @@ async def async_setup_entry(
 ) -> None:
     """Set up the device tracker platform."""
     coordinator: ZeekrCoordinator = hass.data[DOMAIN][entry.entry_id]
+    VehicleEntityManager(
+        hass,
+        entry,
+        coordinator,
+        async_add_entities,
+        lambda vin: [ZeekrDeviceTracker(coordinator, vin)],
+    ).start()
 
-    entities = []
-    for vin in coordinator.data:
-        entities.append(ZeekrDeviceTracker(coordinator, vin))
 
-    async_add_entities(entities)
+class ZeekrDeviceTracker(ZeekrEntity, TrackerEntity):
+    """GPS tracker for a vehicle."""
 
-
-class ZeekrDeviceTracker(CoordinatorEntity, TrackerEntity):
-    """Zeekr Device Tracker."""
-
-    _attr_has_entity_name = True
+    _attr_name = "位置"
+    _attr_icon = "mdi:car-connected"
 
     def __init__(self, coordinator: ZeekrCoordinator, vin: str) -> None:
-        """Initialize the tracker."""
-        super().__init__(coordinator)
-        self.vin = vin
-        self._attr_name = "Location"
-        self._attr_unique_id = f"{vin}_location"
+        super().__init__(coordinator, vin, "location")
 
     @property
     def source_type(self) -> SourceType:
-        """Return the source type, eg gps or router, of the device."""
         return SourceType.GPS
 
     @property
     def latitude(self) -> float | None:
-        """Return latitude value of the device."""
-        data = self.coordinator.data.get(self.vin, {})
-        try:
-            val = data.get("basicVehicleStatus", {}).get("position", {}).get("latitude")
-            return float(val) if val else None
-        except (ValueError, TypeError):
-            return None
+        value = self.get("position", "latitude")
+        return float(value) if value is not None else None
 
     @property
     def longitude(self) -> float | None:
-        """Return longitude value of the device."""
-        data = self.coordinator.data.get(self.vin, {})
-        try:
-            val = (
-                data.get("basicVehicleStatus", {}).get("position", {}).get("longitude")
-            )
-            return float(val) if val else None
-        except (ValueError, TypeError):
-            return None
+        value = self.get("position", "longitude")
+        return float(value) if value is not None else None
 
     @property
-    def device_info(self):
-        """Return device info."""
+    def location_accuracy(self) -> int:
+        # The backend does not expose an accuracy; assume a sane default so the
+        # zone is drawn compactly instead of as a city-wide blob.
+        return 20
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
         return {
-            "identifiers": {(DOMAIN, self.vin)},
-            "name": f"Zeekr {self.vin}",
-            "manufacturer": "Zeekr",
+            "valid": self.get("position", "valid"),
+            "heading": self.get("position", "heading"),
+            "speed": self.get("position", "speed"),
+            "altitude": self.get("position", "altitude"),
+            "position_time": self.get("position", "timestamp"),
         }
+
+    @property
+    def available(self) -> bool:
+        # Position can legitimately be missing; keep the entity available so the
+        # user sees "unknown" rather than "unavailable".
+        return super().available

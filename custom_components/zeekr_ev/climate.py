@@ -1,9 +1,8 @@
-"""Climate platform for Zeekr EV API Integration."""
+"""Climate platform — cabin pre-conditioning."""
 
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime, timezone
+import logging
 from typing import Any
 
 from homeassistant.components.climate import (
@@ -15,10 +14,15 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import DOMAIN
 from .coordinator import ZeekrCoordinator
+from .entity import VehicleEntityManager, ZeekrEntity
+
+_LOGGER = logging.getLogger(__name__)
+
+DEFAULT_TARGET_TEMP = 22.0
 
 
 async def async_setup_entry(
@@ -28,173 +32,94 @@ async def async_setup_entry(
 ) -> None:
     """Set up the climate platform."""
     coordinator: ZeekrCoordinator = hass.data[DOMAIN][entry.entry_id]
-    entities: list[ZeekrClimate] = []
+    VehicleEntityManager(
+        hass,
+        entry,
+        coordinator,
+        async_add_entities,
+        lambda vin: [ZeekrClimate(coordinator, vin)],
+    ).start()
 
-    for vin in coordinator.data:
-        entities.append(ZeekrClimate(coordinator, vin))
 
-    async_add_entities(entities)
+class ZeekrClimate(ZeekrEntity, ClimateEntity, RestoreEntity):
+    """Cabin air conditioning / pre-conditioning."""
 
-
-class ZeekrClimate(CoordinatorEntity, ClimateEntity):
-    """Zeekr Climate class."""
-
-    _attr_has_entity_name = True
-    _attr_name = "Climate"
+    _attr_name = "空调"
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
     _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT_COOL]
+    _attr_min_temp = 16.0
+    _attr_max_temp = 30.0
+    _attr_target_temperature_step = 0.5
+    _attr_icon = "mdi:air-conditioner"
 
     def __init__(self, coordinator: ZeekrCoordinator, vin: str) -> None:
-        """Initialize the climate entity."""
-        super().__init__(coordinator)
-        self.vin = vin
-        self._attr_unique_id = f"{vin}_climate"
-        self._target_temperature = 20.0  # Default since vehicle doesn't report setpoint
+        super().__init__(coordinator, vin, "climate")
+        self._attr_target_temperature = DEFAULT_TARGET_TEMP
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state is not None:
+            temp = last_state.attributes.get("temperature")
+            try:
+                if temp is not None:
+                    self._attr_target_temperature = float(temp)
+            except (TypeError, ValueError):
+                pass
+
+    # -- state ------------------------------------------------------------
 
     @property
     def current_temperature(self) -> float | None:
-        """Return the current temperature."""
+        value = self.get("climate", "inside_temp")
         try:
-            val = (
-                self.coordinator.data.get(self.vin, {})
-                .get("additionalVehicleStatus", {})
-                .get("climateStatus", {})
-                .get("interiorTemp")
-            )
-            return float(val) if val is not None else None
-        except (ValueError, TypeError, AttributeError):
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
             return None
 
     @property
     def target_temperature(self) -> float | None:
-        """Return the temperature we try to reach."""
-        return self._target_temperature
+        return self._attr_target_temperature
 
     @property
-    def hvac_mode(self) -> HVACMode:
-        """Return hvac operation ie. heat, cool mode."""
-        try:
-            status = (
-                self.coordinator.data.get(self.vin, {})
-                .get("additionalVehicleStatus", {})
-                .get("climateStatus", {})
-            )
-            # preClimateActive is likely a boolean or "true"/"false" string
-            active = status.get("preClimateActive")
-            if str(active).lower() in ("true", "1"):
-                return HVACMode.HEAT_COOL
-            return HVACMode.OFF
-        except (ValueError, TypeError, AttributeError):
-            return HVACMode.OFF
+    def hvac_mode(self) -> HVACMode | None:
+        active = self.get("climate", "ac_on")
+        if active is None:
+            return None
+        return HVACMode.HEAT_COOL if active else HVACMode.OFF
+
+    # -- commands ---------------------------------------------------------
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        """Set new target hvac mode."""
-        vehicle = self.coordinator.get_vehicle_by_vin(self.vin)
-        if not vehicle:
-            return
-
-        command = "start"
-        service_id = "ZAF"
-        setting = None
-
         if hvac_mode == HVACMode.HEAT_COOL:
-            # Turn ON
-            duration = getattr(self.coordinator, "ac_duration", 15)
-            setting = {
-                "serviceParameters": [
-                    {
-                        "key": "AC",
-                        "value": "true"
-                    },
-                    {
-                        "key": "AC.temp",
-                        "value": str(self._target_temperature)
-                    },
-                    {
-                        "key": "AC.duration",
-                        "value": str(duration)
-                    }
-                ]
-            }
-        elif hvac_mode == HVACMode.OFF:
-            # Turn OFF
-            setting = {
-                "serviceParameters": [
-                    {
-                        "key": "AC",
-                        "value": "false"
-                    }
-                ]
-            }
-
-        if setting:
-            await self.coordinator.async_inc_invoke()
-            await self.hass.async_add_executor_job(
-                vehicle.do_remote_control, command, service_id, setting
+            duration = self.coordinator.ac_duration
+            await self.send_command(
+                "start",
+                "ZAF",
+                {
+                    "serviceParameters": [
+                        {"key": "AC", "value": "true"},
+                        {"key": "AC.temp", "value": str(self._attr_target_temperature)},
+                        {"key": "AC.duration", "value": str(duration)},
+                    ]
+                },
             )
-
-            # Optimistic update
-            self._update_local_state_optimistically(hvac_mode)
-            self.async_write_ha_state()
-
-            # delayed refresh
-            async def delayed_refresh():
-                await asyncio.sleep(10)
-                await self.coordinator.async_request_refresh()
-            self.hass.async_create_task(delayed_refresh())
-
-    def _update_local_state_optimistically(self, hvac_mode: HVACMode) -> None:
-        """Update the coordinator data to reflect the change immediately."""
-        data = self.coordinator.data.get(self.vin)
-        if not data:
-            return
-
-        climate_status = (
-            data.setdefault("additionalVehicleStatus", {})
-            .setdefault("climateStatus", {})
-        )
-
-        if hvac_mode == HVACMode.HEAT_COOL:
-            climate_status["preClimateActive"] = "1"
+            self.coordinator.set_optimistic(self.vin, "climate", "ac_on", value=True)
+        elif hvac_mode == HVACMode.OFF:
+            await self.send_command(
+                "start", "ZAF", {"serviceParameters": [{"key": "AC", "value": "false"}]}
+            )
+            self.coordinator.set_optimistic(self.vin, "climate", "ac_on", value=False)
         else:
-            climate_status["preClimateActive"] = "0"
+            _LOGGER.warning("不支持的空调模式: %s", hvac_mode)
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
-        """Set new target temperature."""
-        if (temp := kwargs.get("temperature")) is None:
+        temperature = kwargs.get("temperature")
+        if temperature is None:
             return
-
-        self._target_temperature = temp
-
-        # If currently running, update the temp by sending the command again
+        self._attr_target_temperature = float(temperature)
+        self.async_write_ha_state()
+        # If the AC is already running, push the new setpoint immediately.
         if self.hvac_mode == HVACMode.HEAT_COOL:
             await self.async_set_hvac_mode(HVACMode.HEAT_COOL)
-
-    @property
-    def extra_state_attributes(self):
-        """Return the state attributes."""
-        attrs = {}
-        try:
-            val = (
-                self.coordinator.data.get(self.vin, {})
-                .get("additionalVehicleStatus", {})
-                .get("climateStatus", {})
-                .get("updateTime")
-            )
-            if val is not None:
-                # Convert milliseconds to datetime
-                dt = datetime.fromtimestamp(int(val) / 1000, tz=timezone.utc)
-                attrs["last_updated"] = dt.isoformat()
-        except (ValueError, TypeError, AttributeError):
-            pass
-        return attrs
-
-    @property
-    def device_info(self):
-        """Return device info."""
-        return {
-            "identifiers": {(DOMAIN, self.vin)},
-            "name": f"Zeekr {self.vin}",
-            "manufacturer": "Zeekr",
-        }

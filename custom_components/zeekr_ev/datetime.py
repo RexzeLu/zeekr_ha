@@ -1,21 +1,47 @@
-"""Datetime platform for Zeekr EV API Integration."""
+"""Datetime platform — departure (travel plan) time."""
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
+from typing import Any
 
 from homeassistant.components.datetime import DateTimeEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import ZeekrCoordinator
-from .entity import ZeekrEntity
+from .entity import VehicleEntityManager, ZeekrEntity
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "on", "yes")
+
+
+def _to_utc(value: Any) -> datetime | None:
+    """Convert a gateway timestamp (epoch ms, epoch s or ISO) to UTC datetime."""
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip().lstrip("-").isdigit():
+        parsed = dt_util.parse_datetime(value)
+        return dt_util.as_utc(parsed) if parsed is not None else None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number > 1e11:  # milliseconds
+        number = number / 1000.0
+    if number <= 0:
+        return None
+    return dt_util.utc_from_timestamp(number)
 
 
 async def async_setup_entry(
@@ -25,83 +51,54 @@ async def async_setup_entry(
 ) -> None:
     """Set up the datetime platform."""
     coordinator: ZeekrCoordinator = hass.data[DOMAIN][entry.entry_id]
-    entities: list[DateTimeEntity] = []
-
-    for vehicle in coordinator.vehicles:
-        entities.append(ZeekrDepartureTime(coordinator, vehicle.vin))
-
-    async_add_entities(entities)
+    VehicleEntityManager(
+        hass,
+        entry,
+        coordinator,
+        async_add_entities,
+        lambda vin: [ZeekrDepartureTime(coordinator, vin)],
+    ).start()
 
 
 class ZeekrDepartureTime(ZeekrEntity, DateTimeEntity, RestoreEntity):
-    """Zeekr Departure Time entity for the travel plan.
+    """Scheduled departure time used by the travel plan."""
 
-    The API uses epoch milliseconds for scheduledTime.
-    This entity converts between datetime and epoch ms.
-    """
-
-    _attr_has_entity_name = True
-    _attr_name = "Departure Time"
+    _attr_name = "预约出发时间"
     _attr_icon = "mdi:clock-start"
 
     def __init__(self, coordinator: ZeekrCoordinator, vin: str) -> None:
-        """Initialize the datetime entity."""
-        super().__init__(coordinator, vin)
-        self._attr_unique_id = f"{vin}_departure_time"
-        self._fallback_value: datetime | None = None
+        super().__init__(coordinator, vin, "departure_time")
+        self._fallback: datetime | None = None
 
     @property
     def native_value(self) -> datetime | None:
-        """Return the departure time from the travel plan."""
-        try:
-            travel_plan = self.coordinator.data.get(self.vin, {}).get("travelPlan", {})
-            scheduled_time = travel_plan.get("scheduledTime")
-            if scheduled_time:
-                epoch_ms = int(scheduled_time)
-                return datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
-        except (ValueError, TypeError, AttributeError):
-            pass
-        return self._fallback_value
+        value = _to_utc(self.get("travel_plan", "scheduled_time"))
+        return value if value is not None else self._fallback
 
     async def async_added_to_hass(self) -> None:
-        """Restore last known value on startup."""
         await super().async_added_to_hass()
-        last_state = await self.async_get_last_state()
-        if last_state and last_state.state not in (None, "unknown", "unavailable"):
-            try:
-                self._fallback_value = datetime.fromisoformat(last_state.state)
-            except (ValueError, TypeError):
-                pass
+        last = await self.async_get_last_state()
+        if last is not None and last.state not in (None, "unknown", "unavailable"):
+            self._fallback = dt_util.parse_datetime(last.state)
 
     async def async_set_value(self, value: datetime) -> None:
-        """Set a new departure time and push the travel plan to the API."""
-        vehicle = self.coordinator.get_vehicle_by_vin(self.vin)
-        if not vehicle:
-            return
+        aware = dt_util.as_utc(value) if value.tzinfo else dt_util.as_utc(
+            value.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+        )
+        epoch_ms = str(int(aware.timestamp() * 1000))
 
-        # Convert datetime to epoch milliseconds
-        epoch_ms = str(int(value.timestamp() * 1000))
-
-        # Get current travel plan values
-        current_plan = self.coordinator.data.get(self.vin, {}).get("travelPlan", {})
-        ac = current_plan.get("ac", "true")
-        ac_preconditioning = str(ac).lower() == "true"
-        bw = current_plan.get("bw", "0")
-        steering_wheel_heating = bw not in ("0", "", None)
-        current_command = current_plan.get("command", "start")
-
-        await self.coordinator.async_inc_invoke()
-        await self.hass.async_add_executor_job(
-            vehicle.set_travel_plan,
-            current_command,
-            "",  # start_time not used for departure
-            epoch_ms,
-            ac_preconditioning,
-            steering_wheel_heating,
+        command = str(self.get("travel_plan", "command") or "start")
+        ac = self.get("travel_plan", "ac")
+        ac_preconditioning = _truthy(ac) if ac is not None else True
+        steering_wheel_heating = _truthy(
+            self.get("travel_plan", "steering_wheel_heat")
         )
 
-        # Optimistic update
-        self._fallback_value = value
-        plan_data = self.coordinator.data.setdefault(self.vin, {}).setdefault("travelPlan", {})
-        plan_data["scheduledTime"] = epoch_ms
-        self.async_write_ha_state()
+        await self.coordinator.async_set_travel_plan(
+            self.vin, command, "", epoch_ms, ac_preconditioning,
+            steering_wheel_heating,
+        )
+        self._fallback = aware
+        self.coordinator.set_optimistic(
+            self.vin, "travel_plan", "scheduled_time", value=epoch_ms
+        )

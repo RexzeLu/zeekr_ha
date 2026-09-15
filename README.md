@@ -1,86 +1,101 @@
-# Zeekr EV Integration for Home Assistant
+# 极氪 Zeekr EV · Home Assistant 集成
 
-Custom integration for Zeekr Electric Vehicles, with **China mainland +86 SMS code login** support.
+极氪汽车 Home Assistant 自定义集成，**仅支持中国大陆 +86 手机号短信验证码登录**。
 
-## Two Login Methods
+> **关于登录方式**：邮箱/密码登录在中国大陆不可用（需要从 App 中提取 HMAC / RSA / VIN 密钥，
+> 且线上接口对邮箱账号限制严格），因此本集成不再提供该方式。
+> 如果你在旧版本中用过邮箱登录，请删除旧的配置项，然后用手机号重新添加。
 
-### Method 1: SMS Code (+86 China mainland) — NEW
-- Based on [flows.json](flows.json) reverse engineering
-- Uses phone number + SMS verification code
-- No additional keys required
-- Three-API-gateway auth pipeline (JWT → AccessToken → SNCTSP)
-- Powered by `api_sms.py` using built-in signers
+## 功能
 
-### Method 2: Email + Password (original)
-- Uses [zeekr_ev_api](https://github.com/Fryyyyy/zeekr_ev_api) library
-- Requires HMAC keys, VIN encryption keys from app decompilation
-- Recommended to create a separate shared account
+| 平台 | 说明 |
+| --- | --- |
+| `device_tracker` | 车辆位置（GPS 经纬度） |
+| `sensor` | 电量、续航、总里程、车内温度、充电功率/电压/电流、预计充满时间、充电上限、车速、四轮胎压/胎温 |
+| `binary_sensor` | 充电中、已插枪、四门/后备箱/前机盖、四车窗、胎压报警 |
+| `lock` | 车门锁、充电口盖 |
+| `switch` | 充电、前风挡除霜、方向盘加热、哨兵模式、充电计划、出行计划、出行空调 |
+| `climate` | 空调（开关 + 温度设定） |
+| `cover` | 遮阳帘、所有车窗 |
+| `select` | 主/副驾与后排座椅加热、主/副驾座椅通风（关闭 / 1–3 档） |
+| `number` | 充电上限（50–100%） |
+| `button` | 闪灯、鸣笛并闪灯、关闭驻车舒适、立即刷新 |
+| `time` | 充电计划开始 / 结束时间 |
+| `datetime` | 预约出发时间 |
 
-## Features
-
-- **Climate**: Control Heating / Cooling Vents & Seats and Steering Wheel
-- **Sensors**: Battery Level, Range, Odometer, Interior Temperature, Tire Pressures, Charging Power, Voltage, Speed
-- **Binary Sensors**: Charging Status, Plugged In Status, Doors, Tyre Warnings
-- **Buttons**: Flash blinkers, enable/disable Sentry Mode
-- **Locks**: Door and Trunk Lock
-- **Device Tracker**: Location tracking
-- **Covers**: Charging port, Windows, Sunroof, Trunk
-- **Numbers**: Charging limit, AC temperature
-- **Selects**: Drive mode, Steering mode, Energy recovery mode
-- **Switches**: Sentry mode, Valet mode, Brake hold, Speed limit
-- **Datetime / Time**: Scheduled charging
-- **Services**: get_trip_trackpoints
-
-## Installation
+## 安装
 
 ### HACS
-1. Open HACS
-2. Add this repository as a custom repository (Integration)
-3. Search for "Zeekr EV Integration" and install
-4. Restart Home Assistant
 
-### Manual
-1. Copy the `custom_components/zeekr_ev` folder to your Home Assistant `config/custom_components/` directory
-2. Restart Home Assistant
+1. 打开 HACS → 集成 → 右上角菜单 → 添加自定义仓库
+2. 填入本仓库地址，类别选择「集成」
+3. 搜索 “Zeekr EV” 并安装，然后重启 Home Assistant
 
-## Configuration
+### 手动安装
 
-### SMS Login (Recommended for China)
-1. Go to Settings -> Devices & Services -> Add Integration
-2. Search for "Zeekr EV"
-3. Select "SMS Login"
-4. Choose region code (+86 for China mainland)
-5. Enter phone number
-6. Enter SMS verification code
-7. Complete
+1. 把 `custom_components/zeekr_ev` 整个目录复制到 HA 配置目录的 `config/custom_components/` 下
+2. 重启 Home Assistant
 
-### Email Login
-1. Go to Settings -> Devices & Services -> Add Integration
-2. Search for "Zeekr EV"
-3. Select "Email Login"
-4. Enter email, password, country code, and API keys
-5. Complete
+依赖：`pycryptodome>=3.20.0`（`manifest.json` 中已声明，HA 会自动安装）。
 
-## Tips
+## 配置
 
-- **Account**: Create a new account and share your car with it to avoid "The account is currently logged in elsewhere"
-- **Display**: Use vehicle-status-card for a good quality dashboard
-- **Secrets for email login**: Get the secrets by decompiling the Android app
+1. 「设置 → 设备与服务 → 添加集成」，搜索 **Zeekr EV**
+2. 选择国家/地区代码（默认 `+86`），填入极氪 App 注册的手机号
+3. 收到短信后填入验证码，完成
 
-## API Architecture (SMS Login)
+登录成功后凭据（JWT / accessToken / refreshToken）会保存到配置项中，之后可自动续期，无需重复验证码。
 
-Based on Node-RED flows.json analysis, the SMS login uses three gateways:
+> 建议使用一个**独立的极氪账号**并把车辆共享给它，避免与手机 App 互相挤下线。
 
-| Gateway | URL | Signing | Purpose |
-|---------|-----|---------|---------|
-| JWT Gateway | api-gw-toc.zeekrlife.com | SHA1 sorted-sign | SMS, login, auth code |
-| Line Gateway | api.zeekrline.com | HMAC-SHA1 | Ecar login, vehicle status |
-| SNCTSP Gateway | snc-tsp-api.zeekrlife.com | HMAC-SHA256 + AES VIN | Vehicle list, latest status |
+## 选项（「配置 → 选项」）
 
-## Issues
+- **轮询间隔**：默认 5 分钟（1–60）
+- **允许下发控制指令**：总开关，关闭后所有写操作会被拒绝，只读
+- **座椅加热/通风时长**、**空调运行时长**、**方向盘加热时长**：默认 15 分钟
 
-Please report issues on the [GitHub Issue Tracker](https://github.com/Fryyyyy/zeekr_homeassistant/issues).
+## 服务
 
-## License
+| 服务 | 说明 |
+| --- | --- |
+| `zeekr_ev.refresh` | 立即重新获取车辆列表与状态 |
+| `zeekr_ev.dump_raw_status` | 返回网关原始 JSON 报文（已剔除令牌），用于排查字段映射 |
+
+## 排查问题
+
+### 实体显示「未知」
+
+网关在不同车型/固件下返回的字段名不一致。本集成使用**容错解析**：
+把报文里所有叶子节点建索引，再按别名表匹配，因此少数字段名变化不会导致整体失效。
+如果某些实体仍为未知，按下面步骤导出真实报文反馈：
+
+1. 「设置 → 设备与服务 → 极氪 → 下载诊断信息」，或
+2. 「开发者工具 → 操作 → `zeekr_ev.dump_raw_status`」，复制返回的 JSON
+
+拿到真实报文后，只要在 `custom_components/zeekr_ev/parser.py` 的 `_ALIAS` 表里补上字段名即可。
+
+### 位置不更新
+
+位置需要车辆状态接口返回 GPS 字段。若 `position` 始终为空，请用上面的方式导出报文确认字段名。
+
+## 架构
+
+登录涉及三个网关：
+
+| 网关 | 地址 | 签名 | 用途 |
+| --- | --- | --- | --- |
+| GW1 | `api-gw-toc.zeekrlife.com` | SHA1 排序签名 | 短信验证码、手机号登录（JWT） |
+| GW2 | `api.zeekrline.com` | HMAC-SHA1 | 换取 ecar accessToken、车辆列表/状态（兜底） |
+| GW3 | `snc-tsp-api.zeekrlife.com` | HMAC-SHA256 + AES 加密 VIN | 车辆列表、最新状态、远程控制 |
+
+代码结构：
+
+- `parser.py` — 容错解析与字段规范化（对外输出统一的数据结构）
+- `api_sms.py` — 三个网关的签名与高层异步接口
+- `coordinator.py` — 轮询、下发指令、乐观更新
+- `entity.py` — 实体基类 + `VehicleEntityManager`（车辆出现后自动补建实体）
+- 各 `*.py` 平台 — 只负责把状态映射成实体并组装指令
+
+## 许可
 
 MIT

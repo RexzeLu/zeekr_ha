@@ -1,261 +1,178 @@
-"""Custom integration to integrate Zeekr EV API Integration with Home Assistant.
+"""The Zeekr EV integration — China mainland (SMS / +86) login only."""
 
-For more details about this integration, please refer to
-https://github.com/Fryyyyy/zeekr_homeassistant
-"""
+from __future__ import annotations
 
 import logging
-import importlib
 
-import voluptuous as vol
-
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
-from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
-from homeassistant.helpers.typing import ConfigType
 import homeassistant.helpers.config_validation as cv
+import voluptuous as vol
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.exceptions import (
+    ConfigEntryNotReady,
+    HomeAssistantError,
+)
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.typing import ConfigType
 
+from .api_sms import ZeekrSmsApiClient
 from .const import (
-    CONF_HMAC_ACCESS_KEY,
-    CONF_HMAC_SECRET_KEY,
-    CONF_PASSWORD,
-    CONF_PASSWORD_PUBLIC_KEY,
-    CONF_PROD_SECRET,
-    CONF_USERNAME,
-    CONF_VIN_IV,
-    CONF_VIN_KEY,
-    CONF_COUNTRY_CODE,
-    CONF_USE_LOCAL_API,
+    ATTR_CONFIG_ENTRY_ID,
+    ATTR_VIN,
     DOMAIN,
     PLATFORMS,
+    SERVICE_DUMP_RAW,
+    SERVICE_REFRESH,
     STARTUP_MESSAGE,
 )
 from .coordinator import ZeekrCoordinator
-from .coordinator_sms import ZeekrSmsCoordinator
-from .request_stats import ZeekrRequestStats
-from .const import CONF_LOGIN_TYPE, LOGIN_TYPE_SMS, CONF_PHONE
 
-_LOGGER: logging.Logger = logging.getLogger(__package__)
+_LOGGER = logging.getLogger(__name__)
 
-# Service constants
-SERVICE_GET_TRIP_TRACKPOINTS = "get_trip_trackpoints"
-ATTR_VIN = "vin"
-ATTR_TRIP_ID = "trip_id"
-ATTR_TRIP_REPORT_TIME = "trip_report_time"
-
-# Service schema
-SERVICE_GET_TRIP_TRACKPOINTS_SCHEMA = vol.Schema(
-    {
-        vol.Required(ATTR_VIN): cv.string,
-        vol.Required(ATTR_TRIP_ID): cv.positive_int,
-        vol.Required(ATTR_TRIP_REPORT_TIME): cv.positive_int,
-    }
-)
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
-def get_zeekr_client_class(use_local: bool = False):
-    """Dynamically import ZeekrClient from local or installed package."""
-    if use_local:
-        try:
-            # Try to import from local custom_components folder
-            module = importlib.import_module("custom_components.zeekr_ev_api.client")
-            _LOGGER.debug("Using local zeekr_ev_api from custom_components")
-            return module.ZeekrClient
-        except ImportError as ex:
-            raise ImportError(
-                "Local zeekr_ev_api not found in custom_components. "
-                "Please install it or disable 'Use local API' option."
-            ) from ex
-
-    # Try to import from installed package (pip)
-    try:
-        module = importlib.import_module("zeekr_ev_api.client")
-        _LOGGER.debug("Using installed zeekr_ev_api package")
-        return module.ZeekrClient
-    except ImportError as ex:
-        raise ImportError(
-            "zeekr_ev_api package not installed. "
-            "Please install it via pip or enable 'Use local API' option."
-        ) from ex
-
-
-async def async_setup(hass: HomeAssistant, config: ConfigType):
-    """Set up this integration using YAML is not supported."""
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Integration is configured through the UI only."""
+    hass.data.setdefault(DOMAIN, {})
     return True
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
-    "Set up this integration using UI."
-    if hass.data.get(DOMAIN) is None:
-        hass.data.setdefault(DOMAIN, {})
-        _LOGGER.info(STARTUP_MESSAGE)
-    login_type = entry.data.get(CONF_LOGIN_TYPE, LOGIN_TYPE_SMS)
-    if login_type == LOGIN_TYPE_SMS:
-        return await _async_setup_sms_entry(hass, entry)
-    else:
-        return await _async_setup_email_entry(hass, entry)
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up a Zeekr account from a config entry."""
+    hass.data.setdefault(DOMAIN, {})
+    if hass.data[DOMAIN].get(entry.entry_id) is not None:
+        return True
 
-async def async_setup_services(hass: HomeAssistant) -> None:
-    """Set up services for the Zeekr integration."""
+    _LOGGER.info(STARTUP_MESSAGE)
 
-    async def async_get_trip_trackpoints(call: ServiceCall) -> ServiceResponse:
-        """Handle the get_trip_trackpoints service call."""
-        vin = call.data[ATTR_VIN]
-        trip_id = call.data[ATTR_TRIP_ID]
-        trip_report_time = call.data[ATTR_TRIP_REPORT_TIME]
-
-        # Find the coordinator for this VIN
-        coordinator = None
-        for entry_id, coord in hass.data[DOMAIN].items():
-            if entry_id.startswith("_"):
-                continue
-            if isinstance(coord, ZeekrCoordinator):
-                for vehicle in coord.vehicles:
-                    if vehicle.vin == vin:
-                        coordinator = coord
-                        break
-            if coordinator:
-                break
-
-        if not coordinator:
-            raise HomeAssistantError(f"Vehicle with VIN {vin} not found")
-
-        vehicle = coordinator.get_vehicle_by_vin(vin)
-        if not vehicle:
-            raise HomeAssistantError(f"Vehicle with VIN {vin} not found")
-
-        try:
-            # Increment API request counter
-            await coordinator.request_stats.async_inc_request()
-
-            # Fetch trackpoints
-            trackpoints = await hass.async_add_executor_job(
-                vehicle.get_trip_trackpoints, trip_report_time, trip_id
-            )
-
-            _LOGGER.debug(
-                "Fetched %d trackpoints for trip %d", len(trackpoints), trip_id
-            )
-
-            return {
-                "vin": vin,
-                "trip_id": trip_id,
-                "trip_report_time": trip_report_time,
-                "trackpoints": trackpoints,
-                "count": len(trackpoints),
-            }
-
-        except Exception as ex:
-            _LOGGER.error("Failed to fetch trip trackpoints: %s", ex)
-            raise HomeAssistantError(f"Failed to fetch trackpoints: {ex}") from ex
-
-    # Only register if not already registered
-    if not hass.services.has_service(DOMAIN, SERVICE_GET_TRIP_TRACKPOINTS):
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_GET_TRIP_TRACKPOINTS,
-            async_get_trip_trackpoints,
-            schema=SERVICE_GET_TRIP_TRACKPOINTS_SCHEMA,
-            supports_response=SupportsResponse.ONLY,
-        )
-        _LOGGER.debug("Registered service: %s.%s", DOMAIN, SERVICE_GET_TRIP_TRACKPOINTS)
-
-
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Handle removal of an entry."""
-    coordinator = hass.data[DOMAIN].get(entry.entry_id)
-    if coordinator and hasattr(coordinator, 'request_stats'):
-        await coordinator.request_stats.async_shutdown()
-
-    if unloaded := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        hass.data[DOMAIN].pop(entry.entry_id)
-
-    # Unregister services if no more entries
-    remaining_entries = [
-        k for k in hass.data.get(DOMAIN, {}).keys() if not k.startswith("_")
-    ]
-    if not remaining_entries:
-        hass.services.async_remove(DOMAIN, SERVICE_GET_TRIP_TRACKPOINTS)
-        _LOGGER.debug("Unregistered service: %s.%s", DOMAIN, SERVICE_GET_TRIP_TRACKPOINTS)
-
-    return unloaded
-
-
-async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload config entry."""
-    await async_unload_entry(hass, entry)
-    await async_setup_entry(hass, entry)
-
-
-# SMS login helpers added below (import-time definitions)
-
-
-
-
-async def _async_setup_sms_entry(hass, entry):
-    from homeassistant.helpers.aiohttp_client import async_get_clientsession
-    from .api_sms import ZeekrSmsApiClient
-    from .coordinator_sms import ZeekrSmsCoordinator
     session = async_get_clientsession(hass)
     client = ZeekrSmsApiClient(session)
     client.store_tokens(entry.data)
-    coordinator = ZeekrSmsCoordinator(hass, client=client, entry=entry)
-    await coordinator.async_config_entry_first_refresh()
-    if coordinator.vehicles:
-        _LOGGER.info("Found %d vehicle(s): %s", len(coordinator.vehicles), ", ".join(v.vin for v in coordinator.vehicles))
-    else:
-        _LOGGER.warning("No vehicles found, will retry on next poll")
-    hass.data[DOMAIN][entry.entry_id] = coordinator
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    await async_setup_services(hass)
-    entry.async_on_unload(entry.add_update_listener(async_reload_entry))
-    return True
 
-
-async def _async_setup_email_entry(hass, entry):
-    username = entry.data.get(CONF_USERNAME)
-    password = entry.data.get(CONF_PASSWORD)
-    country_code = entry.data.get(CONF_COUNTRY_CODE, "")
-    hmac_access_key = entry.data.get(CONF_HMAC_ACCESS_KEY, "")
-    hmac_secret_key = entry.data.get(CONF_HMAC_SECRET_KEY, "")
-    password_public_key = entry.data.get(CONF_PASSWORD_PUBLIC_KEY, "")
-    prod_secret = entry.data.get(CONF_PROD_SECRET, "")
-    vin_key = entry.data.get(CONF_VIN_KEY, "")
-    vin_iv = entry.data.get(CONF_VIN_IV, "'")
-    if not username or not password:
-        _LOGGER.warning("No username or password")
-        return False
-    use_local_api = entry.data.get(CONF_USE_LOCAL_API, False)
-    try:
-        ZeekrClient = await hass.async_add_executor_job(get_zeekr_client_class, use_local_api)
-    except ImportError as ex:
-        _LOGGER.error("Failed to import zeekr_ev_api: %s", ex)
-        raise ConfigEntryNotReady from ex
-    client = hass.data.get(DOMAIN, {}).pop("_temp_client", None)
-    if client is None or not client.logged_in:
-        client = ZeekrClient(
-            username=username, password=password, country_code=country_code,
-            hmac_access_key=hmac_access_key, hmac_secret_key=hmac_secret_key,
-            password_public_key=password_public_key, prod_secret=prod_secret,
-            vin_key=vin_key, vin_iv=vin_iv, logger=_LOGGER)
-        try:
-            stats = ZeekrRequestStats(hass)
-            await stats.async_load()
-            await stats.async_inc_request()
-            await hass.async_add_executor_job(client.login)
-        except Exception as ex:
-            _LOGGER.error("Could not log in to Zeekr API: %s", ex)
-            raise ConfigEntryNotReady from ex
-    coordinator = ZeekrCoordinator(hass, client=client, entry=entry)
+    coordinator = ZeekrCoordinator(hass, client, entry)
     await coordinator.async_init_stats()
-    await coordinator.async_config_entry_first_refresh()
-    if coordinator.vehicles:
-        _LOGGER.info("Found %d vehicle(s): %s", len(coordinator.vehicles), ", ".join(v.vin for v in coordinator.vehicles))
-    else:
-        _LOGGER.warning("No vehicles found in account")
+
+    try:
+        # Raises ConfigEntryAuthFailed (-> reauth) or ConfigEntryNotReady.
+        await coordinator.async_config_entry_first_refresh()
+    except Exception as err:  # noqa: BLE001 - re-raised as ConfigEntryNotReady
+        if isinstance(err, (ConfigEntryNotReady, HomeAssistantError)):
+            raise
+        raise ConfigEntryNotReady(f"初始化极氪账户失败: {err}") from err
+
     hass.data[DOMAIN][entry.entry_id] = coordinator
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    await async_setup_services(hass)
-    entry.async_on_unload(entry.add_update_listener(async_reload_entry))
+    _async_register_services(hass)
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
 
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload a config entry."""
+    coordinator: ZeekrCoordinator | None = hass.data.get(DOMAIN, {}).get(
+        entry.entry_id
+    )
+    if coordinator is not None:
+        await coordinator.request_stats.async_shutdown()
+
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unloaded:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+
+    if not hass.data.get(DOMAIN):
+        for service in (SERVICE_REFRESH, SERVICE_DUMP_RAW):
+            if hass.services.has_service(DOMAIN, service):
+                hass.services.async_remove(DOMAIN, service)
+    return unloaded
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Reject entries created by the removed email/password flow."""
+    if entry.version > 1:
+        return True
+
+    data = entry.data or {}
+    looks_like_email = (
+        "username" in data
+        or "password" in data
+        or data.get("login_type") == "email"
+    )
+    if looks_like_email:
+        _LOGGER.error(
+            "配置项 %s 使用已移除的邮箱登录方式。邮箱登录在中国大陆不可用，"
+            "请删除该配置项后使用手机号短信验证码重新添加。",
+            entry.entry_id,
+        )
+        return False
+    return True
+
+
+async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload when options change."""
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+
+
+def _async_register_services(hass: HomeAssistant) -> None:
+    """Register the integration services (idempotent)."""
+
+    async def _service_refresh(call: ServiceCall) -> None:
+        entry_id = call.data.get(ATTR_CONFIG_ENTRY_ID)
+        targets = [
+            coord
+            for eid, coord in hass.data.get(DOMAIN, {}).items()
+            if isinstance(coord, ZeekrCoordinator) and (not entry_id or eid == entry_id)
+        ]
+        if not targets:
+            raise HomeAssistantError("未找到匹配的极氪配置项")
+        for coordinator in targets:
+            await coordinator.async_force_discovery()
+
+    async def _service_dump_raw(call: ServiceCall) -> dict:
+        entry_id = call.data.get(ATTR_CONFIG_ENTRY_ID)
+        vin = call.data.get(ATTR_VIN)
+        result: dict[str, dict] = {}
+        for eid, coordinator in hass.data.get(DOMAIN, {}).items():
+            if not isinstance(coordinator, ZeekrCoordinator):
+                continue
+            if entry_id and eid != entry_id:
+                continue
+            dump = coordinator.dump_raw()
+            if vin:
+                dump["raw_payloads"] = {
+                    key: value
+                    for key, value in (dump.get("raw_payloads") or {}).items()
+                    if key == vin
+                }
+            result[eid] = dump
+        if not result:
+            raise HomeAssistantError("未找到匹配的极氪配置项")
+        return result
+
+    if not hass.services.has_service(DOMAIN, SERVICE_REFRESH):
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_REFRESH,
+            _service_refresh,
+            schema=vol.Schema({vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string}),
+        )
+
+    if not hass.services.has_service(DOMAIN, SERVICE_DUMP_RAW):
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_DUMP_RAW,
+            _service_dump_raw,
+            schema=vol.Schema(
+                {
+                    vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string,
+                    vol.Optional(ATTR_VIN): cv.string,
+                }
+            ),
+            supports_response=SupportsResponse.ONLY,
+        )

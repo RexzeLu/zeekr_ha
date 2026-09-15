@@ -1,4 +1,4 @@
-"""Cover platform for Zeekr EV API Integration."""
+"""Cover platform — sunshade and (grouped) windows."""
 
 from __future__ import annotations
 
@@ -12,10 +12,16 @@ from homeassistant.components.cover import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import ZeekrCoordinator
+from .entity import VehicleEntityManager, ZeekrEntity
+
+_POSITIONS = ("fl", "fr", "rl", "rr")
+
+
+def _target(value: str) -> dict[str, Any]:
+    return {"serviceParameters": [{"key": "target", "value": value}]}
 
 
 async def async_setup_entry(
@@ -25,341 +31,98 @@ async def async_setup_entry(
 ) -> None:
     """Set up the cover platform."""
     coordinator: ZeekrCoordinator = hass.data[DOMAIN][entry.entry_id]
-    entities: list[CoverEntity] = []
+    VehicleEntityManager(
+        hass,
+        entry,
+        coordinator,
+        async_add_entities,
+        lambda vin: [
+            ZeekrSunshade(coordinator, vin),
+            ZeekrWindows(coordinator, vin),
+        ],
+    ).start()
 
-    for vin in coordinator.data:
-        entities.append(ZeekrSunshade(coordinator, vin))
-        entities.append(ZeekrWindows(coordinator, vin))
 
-        # Add individual read-only windows
-        for win in ["Driver", "Passenger", "DriverRear", "PassengerRear"]:
-            entities.append(ZeekrWindow(coordinator, vin, win, f"Window {win}"))
+class ZeekrSunshade(ZeekrEntity, CoverEntity):
+    """Panoramic roof sunshade."""
 
-    async_add_entities(entities)
-
-
-class ZeekrSunshade(CoordinatorEntity, CoverEntity):
-    """Zeekr Sunshade class."""
-
-    _attr_has_entity_name = True
+    _attr_name = "遮阳帘"
     _attr_device_class = CoverDeviceClass.BLIND
     _attr_supported_features = CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE
 
     def __init__(self, coordinator: ZeekrCoordinator, vin: str) -> None:
-        """Initialize the cover entity."""
-        super().__init__(coordinator)
-        self.vin = vin
-        self._attr_name = "Sunshade"
-        self._attr_unique_id = f"{vin}_sunshade"
+        super().__init__(coordinator, vin, "sunshade")
 
     @property
     def is_closed(self) -> bool | None:
-        """Return if the cover is closed or not."""
-        try:
-            val = (
-                self.coordinator.data.get(self.vin, {})
-                .get("additionalVehicleStatus", {})
-                .get("climateStatus", {})
-                .get("curtainOpenStatus")
-            )
-            if val is None:
-                return None
-            # User: "2" (open), "1" (closed)
-            # is_closed expects True if closed
-            return str(val) == "1"
-        except (ValueError, TypeError, AttributeError):
-            return None
+        value = self.get("climate", "curtain_open")
+        return None if value is None else (not value)
 
     @property
     def current_cover_position(self) -> int | None:
-        """Return current position of cover.
-
-        0 is closed, 100 is open.
-        """
+        value = self.get("climate", "curtain_pos")
         try:
-            val = (
-                self.coordinator.data.get(self.vin, {})
-                .get("additionalVehicleStatus", {})
-                .get("climateStatus", {})
-                .get("curtainPos")
-            )
-            return int(val) if val is not None else None
-        except (ValueError, TypeError, AttributeError):
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
             return None
 
     async def async_open_cover(self, **kwargs: Any) -> None:
-        """Open the cover."""
-        vehicle = self.coordinator.get_vehicle_by_vin(self.vin)
-        if not vehicle:
-            return
-
-        command = "start"
-        service_id = "RWS"
-        setting = {
-            "serviceParameters": [
-                {
-                    "key": "target",
-                    "value": "sunshade"
-                }
-            ]
-        }
-
-        await self.coordinator.async_inc_invoke()
-        await self.hass.async_add_executor_job(
-            vehicle.do_remote_control, command, service_id, setting
+        await self.send_command("start", "RWS", _target("sunshade"))
+        self.coordinator.set_optimistic(
+            self.vin, "climate", "curtain_open", value=True
         )
-        self._update_local_state_optimistically(is_open=True)
-        self.async_write_ha_state()
-        await self.coordinator.async_request_refresh()
 
     async def async_close_cover(self, **kwargs: Any) -> None:
-        """Close cover."""
-        vehicle = self.coordinator.get_vehicle_by_vin(self.vin)
-        if not vehicle:
-            return
-
-        command = "stop"
-        service_id = "RWS"
-        setting = {
-            "serviceParameters": [
-                {
-                    "key": "target",
-                    "value": "sunshade"
-                }
-            ]
-        }
-
-        await self.coordinator.async_inc_invoke()
-        await self.hass.async_add_executor_job(
-            vehicle.do_remote_control, command, service_id, setting
-        )
-        self._update_local_state_optimistically(is_open=False)
-        self.async_write_ha_state()
-        await self.coordinator.async_request_refresh()
-
-    def _update_local_state_optimistically(self, is_open: bool) -> None:
-        """Update the coordinator data to reflect the change immediately."""
-        data = self.coordinator.data.get(self.vin)
-        if not data:
-            return
-
-        climate_status = (
-            data.setdefault("additionalVehicleStatus", {})
-            .setdefault("climateStatus", {})
+        await self.send_command("stop", "RWS", _target("sunshade"))
+        self.coordinator.set_optimistic(
+            self.vin, "climate", "curtain_open", value=False
         )
 
-        if is_open:
-            climate_status["curtainOpenStatus"] = "2"
-            climate_status["curtainPos"] = 100
-        else:
-            climate_status["curtainOpenStatus"] = "1"
-            climate_status["curtainPos"] = 0
 
-    @property
-    def device_info(self):
-        """Return device info."""
-        return {
-            "identifiers": {(DOMAIN, self.vin)},
-            "name": f"Zeekr {self.vin}",
-            "manufacturer": "Zeekr",
-        }
+class ZeekrWindows(ZeekrEntity, CoverEntity):
+    """All windows as a single cover."""
 
-
-class ZeekrWindows(CoordinatorEntity, CoverEntity):
-    """Zeekr Windows class (controls all windows)."""
-
-    _attr_has_entity_name = True
+    _attr_name = "所有车窗"
     _attr_device_class = CoverDeviceClass.WINDOW
     _attr_supported_features = CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE
 
     def __init__(self, coordinator: ZeekrCoordinator, vin: str) -> None:
-        """Initialize the cover entity."""
-        super().__init__(coordinator)
-        self.vin = vin
-        self._attr_name = "All Windows"
-        self._attr_unique_id = f"{vin}_all_windows"
+        super().__init__(coordinator, vin, "all_windows")
+
+    def _open_states(self) -> list[bool]:
+        return [
+            value
+            for value in (self.get("windows", pos) for pos in _POSITIONS)
+            if value is not None
+        ]
 
     @property
     def is_closed(self) -> bool | None:
-        """Return if the windows are closed (all closed)."""
-        data = self.coordinator.data.get(self.vin, {})
-        climate_status = data.get("additionalVehicleStatus", {}).get("climateStatus", {})
-
-        # Check all 4 windows
-        # Status code mapping based on API observations:
-        # "1" = Open (or partially open)
-        # "2" = Closed
-        # "0" = Fully Closed (Position 0%)
-
-        for win in ["Driver", "Passenger", "DriverRear", "PassengerRear"]:
-            status = climate_status.get(f"winStatus{win}")
-            if str(status) != "2":
-                return False
-        return True
+        states = self._open_states()
+        if not states:
+            return None
+        return not any(states)
 
     @property
     def current_cover_position(self) -> int | None:
-        """Return average position of windows.
-
-        0 is closed, 100 is open.
-        """
-        data = self.coordinator.data.get(self.vin, {})
-        climate_status = data.get("additionalVehicleStatus", {}).get("climateStatus", {})
-
-        total_pos = 0
-        count = 0
-
-        for win in ["Driver", "Passenger", "DriverRear", "PassengerRear"]:
-            pos = climate_status.get(f"winPos{win}")
-            if pos is not None:
-                try:
-                    total_pos += int(pos)
-                    count += 1
-                except (ValueError, TypeError):
-                    pass
-
-        if count == 0:
+        positions = []
+        for pos in _POSITIONS:
+            value = self.get("window_pos", pos)
+            try:
+                if value is not None:
+                    positions.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        if not positions:
             return None
-        return int(total_pos / count)
+        return int(sum(positions) / len(positions))
 
     async def async_open_cover(self, **kwargs: Any) -> None:
-        """Open all windows."""
-        vehicle = self.coordinator.get_vehicle_by_vin(self.vin)
-        if not vehicle:
-            return
-
-        command = "start"
-        service_id = "RWS"
-        setting = {
-            "serviceParameters": [
-                {
-                    "key": "target",
-                    "value": "window"
-                }
-            ]
-        }
-
-        await self.coordinator.async_inc_invoke()
-        await self.hass.async_add_executor_job(
-            vehicle.do_remote_control, command, service_id, setting
-        )
-        self._update_local_state_optimistically(is_open=True)
-        self.async_write_ha_state()
-        await self.coordinator.async_request_refresh()
+        await self.send_command("start", "RWS", _target("window"))
+        for pos in _POSITIONS:
+            self.coordinator.set_optimistic(self.vin, "windows", pos, value=True)
 
     async def async_close_cover(self, **kwargs: Any) -> None:
-        """Close all windows."""
-        vehicle = self.coordinator.get_vehicle_by_vin(self.vin)
-        if not vehicle:
-            return
-
-        command = "stop"
-        service_id = "RWS"
-        setting = {
-            "serviceParameters": [
-                {
-                    "key": "target",
-                    "value": "window"
-                }
-            ]
-        }
-
-        await self.coordinator.async_inc_invoke()
-        await self.hass.async_add_executor_job(
-            vehicle.do_remote_control, command, service_id, setting
-        )
-        self._update_local_state_optimistically(is_open=False)
-        self.async_write_ha_state()
-        await self.coordinator.async_request_refresh()
-
-    def _update_local_state_optimistically(self, is_open: bool) -> None:
-        """Update the coordinator data to reflect the change immediately."""
-        data = self.coordinator.data.get(self.vin)
-        if not data:
-            return
-
-        climate_status = (
-            data.setdefault("additionalVehicleStatus", {})
-            .setdefault("climateStatus", {})
-        )
-
-        # Update all 4 windows
-        status_val = "1" if is_open else "2"
-        pos_val = 100 if is_open else 0
-
-        for win in ["Driver", "Passenger", "DriverRear", "PassengerRear"]:
-            climate_status[f"winStatus{win}"] = status_val
-            climate_status[f"winPos{win}"] = pos_val
-
-    @property
-    def device_info(self):
-        """Return device info."""
-        return {
-            "identifiers": {(DOMAIN, self.vin)},
-            "name": f"Zeekr {self.vin}",
-            "manufacturer": "Zeekr",
-        }
-
-
-class ZeekrWindow(CoordinatorEntity, CoverEntity):
-    """Zeekr Window (Read-Only) class."""
-
-    _attr_has_entity_name = True
-    _attr_device_class = CoverDeviceClass.WINDOW
-    _attr_supported_features = CoverEntityFeature(0)
-
-    def __init__(self, coordinator: ZeekrCoordinator, vin: str, win_key: str, win_name: str) -> None:
-        """Initialize the cover entity."""
-        super().__init__(coordinator)
-        self.vin = vin
-        self.win_key = win_key
-        self._attr_name = win_name
-        self._attr_unique_id = f"{vin}_window_{win_key.lower()}"
-
-    @property
-    def is_closed(self) -> bool | None:
-        """Return if the window is closed."""
-        try:
-            val = (
-                self.coordinator.data.get(self.vin, {})
-                .get("additionalVehicleStatus", {})
-                .get("climateStatus", {})
-                .get(f"winStatus{self.win_key}")
-            )
-            if val is None:
-                return None
-            # "2" is Closed, "1" is Open
-            return str(val) == "2"
-        except (ValueError, TypeError, AttributeError):
-            return None
-
-    @property
-    def current_cover_position(self) -> int | None:
-        """Return current position of cover."""
-        try:
-            val = (
-                self.coordinator.data.get(self.vin, {})
-                .get("additionalVehicleStatus", {})
-                .get("climateStatus", {})
-                .get(f"winPos{self.win_key}")
-            )
-            return int(val) if val is not None else None
-        except (ValueError, TypeError, AttributeError):
-            return None
-
-    async def async_open_cover(self, **kwargs: Any) -> None:
-        """Open the cover (Not supported)."""
-        pass
-
-    async def async_close_cover(self, **kwargs: Any) -> None:
-        """Close cover (Not supported)."""
-        pass
-
-    @property
-    def device_info(self):
-        """Return device info."""
-        return {
-            "identifiers": {(DOMAIN, self.vin)},
-            "name": f"Zeekr {self.vin}",
-            "manufacturer": "Zeekr",
-        }
+        await self.send_command("stop", "RWS", _target("window"))
+        for pos in _POSITIONS:
+            self.coordinator.set_optimistic(self.vin, "windows", pos, value=False)

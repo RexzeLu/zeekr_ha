@@ -1,224 +1,241 @@
-"""DataUpdateCoordinator for Zeekr EV API Integration."""
+"""DataUpdateCoordinator for the Zeekr EV integration.
+
+Wraps :class:`~.api_sms.ZeekrSmsApiClient` and exposes:
+
+* ``_async_update_data`` – poll + normalise every vehicle's status;
+* ``async_send_command`` / ``async_set_charge_plan`` / ``async_set_travel_plan``
+  – the single funnel every entity platform uses to talk to the car;
+* ``set_optimistic`` – reflect a just-issued command in the UI immediately;
+* option accessors for durations, polling interval and the command switch.
+"""
 
 from __future__ import annotations
 
-import asyncio
-from datetime import timedelta, datetime
 import logging
-from typing import TYPE_CHECKING, Optional
+from datetime import datetime, timedelta
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
+from homeassistant.helpers.event import async_call_later, async_track_time_change
+from homeassistant.helpers.update_coordinator import (
+    DataUpdateCoordinator,
+    UpdateFailed,
+)
 
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-import homeassistant.helpers.event as event
-
-
-from .const import CONF_POLLING_INTERVAL, DEFAULT_POLLING_INTERVAL, DOMAIN
+from .api_sms import ZeekrApiError, ZeekrAuthError, ZeekrSmsApiClient, ZeekrVehicle
+from .const import (
+    CONF_AC_DURATION,
+    CONF_ENABLE_COMMANDS,
+    CONF_POLLING_INTERVAL,
+    CONF_SEAT_DURATION,
+    CONF_STEERING_WHEEL_DURATION,
+    DEFAULT_AC_DURATION,
+    DEFAULT_ENABLE_COMMANDS,
+    DEFAULT_POLLING_INTERVAL,
+    DEFAULT_SEAT_DURATION,
+    DEFAULT_STEERING_WHEEL_DURATION,
+    DOMAIN,
+)
 from .request_stats import ZeekrRequestStats
-
-if TYPE_CHECKING:
-    # Import for type checking only
-    try:
-        from zeekr_ev_api.client import Vehicle, ZeekrClient
-    except ImportError:
-        from custom_components.zeekr_ev_api.client import Vehicle, ZeekrClient
 
 _LOGGER = logging.getLogger(__name__)
 
+# Seconds to wait after a command before re-polling the car.
+COMMAND_REFRESH_DELAY = 12
 
-class ZeekrCoordinator(DataUpdateCoordinator):
-    """Class to manage fetching Zeekr data."""
 
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        client: ZeekrClient,
-        entry: ConfigEntry,
-    ) -> None:
-        """Initialize."""
+class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
+    """Fetch and normalise Zeekr vehicle state."""
+
+    def __init__(self, hass: HomeAssistant, client: ZeekrSmsApiClient,
+                 entry: ConfigEntry) -> None:
         self.client = client
         self.entry = entry
-        self.vehicles: list[Vehicle] = []
-        # Shared settings for command durations
-        self.seat_duration = 15
-        self.ac_duration = 15
-        self.steering_wheel_duration = 15
         self.request_stats = ZeekrRequestStats(hass)
-        self.latest_poll_time: Optional[str] = None  # Track latest poll time
-        polling_interval = entry.data.get(CONF_POLLING_INTERVAL, DEFAULT_POLLING_INTERVAL)
+        self.latest_poll_time: str | None = None
+
+        polling = self._option(CONF_POLLING_INTERVAL, DEFAULT_POLLING_INTERVAL)
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=timedelta(minutes=polling_interval),
+            update_interval=timedelta(minutes=int(polling)),
         )
 
-        # Schedule daily reset at midnight
-        self._unsub_reset = None
-        self._setup_daily_reset()
+        self._unsub_reset = async_track_time_change(
+            hass, self._handle_daily_reset, hour=0, minute=0, second=0
+        )
+        self.entry.async_on_unload(self._unsub_reset)
+        self._unsub_refresh = None
 
-    def _setup_daily_reset(self):
-        if self._unsub_reset:
-            self._unsub_reset()
-        self._unsub_reset = event.async_track_time_change(
-            self.hass, self._handle_daily_reset, hour=0, minute=0, second=0
+    # -- options ----------------------------------------------------------
+
+    def _option(self, key: str, default: Any) -> Any:
+        if key in self.entry.options:
+            return self.entry.options[key]
+        return self.entry.data.get(key, default)
+
+    @property
+    def seat_duration(self) -> int:
+        return int(self._option(CONF_SEAT_DURATION, DEFAULT_SEAT_DURATION))
+
+    @property
+    def ac_duration(self) -> int:
+        return int(self._option(CONF_AC_DURATION, DEFAULT_AC_DURATION))
+
+    @property
+    def steering_wheel_duration(self) -> int:
+        return int(
+            self._option(CONF_STEERING_WHEEL_DURATION, DEFAULT_STEERING_WHEEL_DURATION)
         )
 
-    async def async_init_stats(self):
-        """Initialize stats (load from storage)."""
+    @property
+    def commands_enabled(self) -> bool:
+        return bool(self._option(CONF_ENABLE_COMMANDS, DEFAULT_ENABLE_COMMANDS))
+
+    # -- accessors --------------------------------------------------------
+
+    @property
+    def vehicles(self) -> list[ZeekrVehicle]:
+        return self.client.vehicles
+
+    def get_vehicle(self, vin: str) -> ZeekrVehicle | None:
+        return self.client.get_vehicle(vin)
+
+    def vehicle_vins(self) -> list[str]:
+        """VINs from the vehicle list plus anything we already have data for."""
+        vins = [vehicle.vin for vehicle in self.client.vehicles]
+        for vin in (self.data or {}):
+            if vin not in vins:
+                vins.append(vin)
+        return vins
+
+    async def async_init_stats(self) -> None:
         await self.request_stats.async_load()
 
-    async def _handle_daily_reset(self, now):
+    async def _handle_daily_reset(self, now) -> None:
         await self.request_stats.async_reset_today()
 
-    def get_vehicle_by_vin(self, vin: str) -> Vehicle | None:
-        """Get a vehicle by VIN."""
-        for vehicle in self.vehicles:
-            if vehicle.vin == vin:
-                return vehicle
-        return None
+    # -- polling ----------------------------------------------------------
 
-    async def _async_update_vehicle(self, vehicle: Vehicle) -> tuple[str, dict] | None:
-        """Fetch data for a single vehicle."""
+    async def _async_update_data(self) -> dict[str, dict[str, Any]]:
         try:
+            if not self.client.vehicles:
+                await self.client.async_get_vehicle_list()
             await self.request_stats.async_inc_request()
-            vehicle_data = await self.hass.async_add_executor_job(
-                vehicle.get_status
+            data = await self.client.async_fetch_all()
+        except ZeekrAuthError as err:
+            # Surfaces as a reauth prompt in the UI.
+            raise ConfigEntryAuthFailed(str(err)) from err
+        except ZeekrApiError as err:
+            raise UpdateFailed(str(err)) from err
+        except Exception as err:  # noqa: BLE001
+            raise UpdateFailed(f"与极氪服务通信失败: {err}") from err
+
+        if not data:
+            _LOGGER.warning(
+                "未获取到任何车辆数据：账号下可能没有车辆，或列表接口暂时不可用。"
+                "集成会继续重试。"
             )
-        except Exception as charge_err:
-            _LOGGER.error("Error fetching status for %s: %s", vehicle.vin, charge_err)
-            return None
+        self.latest_poll_time = datetime.now().isoformat()
+        return data
 
-        # Define parallel tasks
-        async def fetch_remote_control_state():
-            try:
-                await self.request_stats.async_inc_request()
-                return await self.hass.async_add_executor_job(
-                    vehicle.get_remote_control_state
-                )
-            except Exception as e:
-                _LOGGER.debug("Error fetching remote control status for %s: %s", vehicle.vin, e)
-                return None
+    async def async_force_discovery(self) -> None:
+        """Re-query the vehicle list (used by the refresh service/button)."""
+        await self.client.async_get_vehicle_list()
+        await self.async_request_refresh()
 
-        async def fetch_charging_status():
-            try:
-                await self.request_stats.async_inc_request()
-                return await self.hass.async_add_executor_job(
-                    vehicle.get_charging_status
-                )
-            except Exception as e:
-                _LOGGER.debug("Error fetching charging status for %s: %s", vehicle.vin, e)
-                return None
+    # -- optimistic state -------------------------------------------------
 
-        async def fetch_charging_limit():
-            try:
-                await self.request_stats.async_inc_request()
-                return await self.hass.async_add_executor_job(
-                    vehicle.get_charging_limit
-                )
-            except Exception as e:
-                _LOGGER.debug("Error fetching charging limit for %s: %s", vehicle.vin, e)
-                return None
+    @callback
+    def set_optimistic(self, vin: str, *path: str, value: Any) -> None:
+        """Write a value into the cached state and notify listeners.
 
-        async def fetch_charge_plan():
-            try:
-                await self.request_stats.async_inc_request()
-                return await self.hass.async_add_executor_job(
-                    vehicle.get_charge_plan
-                )
-            except Exception as e:
-                _LOGGER.debug("Error fetching charge plan for %s: %s", vehicle.vin, e)
-                return None
+        Keeps the UI responsive between issuing a command and the next poll.
+        """
+        if not self.data or vin not in self.data:
+            return
+        node: Any = self.data[vin]
+        for step in path[:-1]:
+            if not isinstance(node, dict):
+                return
+            node = node.setdefault(step, {})
+        if not isinstance(node, dict) or not path:
+            return
+        node[path[-1]] = value
+        self.async_update_listeners()
 
-        async def fetch_travel_plan():
-            try:
-                await self.request_stats.async_inc_request()
-                return await self.hass.async_add_executor_job(
-                    vehicle.get_travel_plan
-                )
-            except Exception as e:
-                _LOGGER.debug("Error fetching travel plan for %s: %s", vehicle.vin, e)
-                return None
+    # -- commands ---------------------------------------------------------
 
-        async def fetch_journey_log():
-            if not hasattr(vehicle, "get_journey_log"):
-                return None
-            try:
-                await self.request_stats.async_inc_request()
-                return await self.hass.async_add_executor_job(
-                    lambda: vehicle.get_journey_log(page_size=50)
-                )
-            except Exception as e:
-                _LOGGER.debug("Error fetching journey log for %s: %s", vehicle.vin, e)
-                return None
+    def _ensure_commands_enabled(self) -> None:
+        if not self.commands_enabled:
+            raise HomeAssistantError(
+                "指令下发已在集成选项中关闭，请到「配置 → 选项」中开启。"
+            )
 
-        # Execute parallel tasks
-        results = await asyncio.gather(
-            fetch_remote_control_state(),
-            fetch_charging_status(),
-            fetch_charging_limit(),
-            fetch_charge_plan(),
-            fetch_travel_plan(),
-            fetch_journey_log(),
-            return_exceptions=True
+    async def async_send_command(self, vin: str, command: str, service_id: str,
+                                 setting: dict[str, Any]) -> dict[str, Any]:
+        """Send a remote-control command (raises on failure)."""
+        self._ensure_commands_enabled()
+        await self.request_stats.async_inc_invoke()
+        return await self.client.async_do_remote_control(
+            vin, command, service_id, setting
         )
 
-        remote_state, charging_status, charging_limit, charge_plan, travel_plan, journey_log = results
+    async def async_send_and_refresh(self, vin: str, command: str,
+                                     service_id: str,
+                                     setting: dict[str, Any],
+                                     delay: int = COMMAND_REFRESH_DELAY
+                                     ) -> dict[str, Any]:
+        """Send a command then re-poll shortly afterwards."""
+        result = await self.async_send_command(vin, command, service_id, setting)
+        self._schedule_refresh(delay)
+        return result
 
-        # Process results
-        if isinstance(remote_state, dict) and remote_state:
-            vehicle_data.setdefault("additionalVehicleStatus", {})[
-                "remoteControlState"
-            ] = remote_state
+    def _schedule_refresh(self, delay: int) -> None:
+        if self._unsub_refresh is not None:
+            self._unsub_refresh()
+            self._unsub_refresh = None
 
-        if isinstance(charging_status, dict) and charging_status:
-            vehicle_data.setdefault("chargingStatus", {}).update(charging_status)
+        async def _refresh(_now) -> None:
+            self._unsub_refresh = None
+            await self.async_request_refresh()
 
-        if isinstance(charging_limit, dict) and charging_limit:
-            vehicle_data["chargingLimit"] = charging_limit
+        self._unsub_refresh = async_call_later(self.hass, delay, _refresh)
 
-        if isinstance(charge_plan, dict) and charge_plan:
-            vehicle_data["chargePlan"] = charge_plan
-
-        if isinstance(travel_plan, dict) and travel_plan:
-            vehicle_data["travelPlan"] = travel_plan
-
-        if isinstance(journey_log, (list, dict)) and journey_log:
-            vehicle_data["journeyLog"] = journey_log
-
-        return vehicle.vin, vehicle_data
-
-    async def _async_update_data(self) -> dict[str, dict]:
-        """Fetch data from API endpoint."""
-        try:
-            # Refresh vehicle list if empty (first run)
-            if not self.vehicles:
-                await self.request_stats.async_inc_request()
-                self.vehicles = await self.hass.async_add_executor_job(
-                    self.client.get_vehicle_list
-                )
-
-            # Update all vehicles in parallel
-            tasks = [self._async_update_vehicle(vehicle) for vehicle in self.vehicles]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            data = {}
-            for result in results:
-                if isinstance(result, BaseException):
-                    _LOGGER.error("Error updating vehicle: %s", result)
-                    continue
-                if result:
-                    vin, vehicle_data = result
-                    data[vin] = vehicle_data
-
-            # Update latest poll time on every automatic poll
-            self.latest_poll_time = datetime.now().isoformat()
-
-        except Exception as err:
-            raise UpdateFailed(f"Error communicating with API: {err}") from err
-        else:
-            return data
-
-    async def async_inc_invoke(self):
+    async def async_set_charge_plan(self, vin: str, start_time: str,
+                                    end_time: str, command: str,
+                                    bc_cycle: bool = False,
+                                    bc_temp: bool = False) -> dict[str, Any]:
+        self._ensure_commands_enabled()
         await self.request_stats.async_inc_invoke()
+        result = await self.client.async_set_charge_plan(
+            vin, start_time, end_time, command, bc_cycle, bc_temp
+        )
+        self._schedule_refresh()
+        return result
+
+    async def async_set_travel_plan(self, vin: str, command: str,
+                                    start_time: str, scheduled_time: str,
+                                    ac_preconditioning: bool = True,
+                                    steering_wheel_heating: bool = False
+                                    ) -> dict[str, Any]:
+        self._ensure_commands_enabled()
+        await self.request_stats.async_inc_invoke()
+        result = await self.client.async_set_travel_plan(
+            vin, command, start_time, scheduled_time,
+            ac_preconditioning, steering_wheel_heating,
+        )
+        self._schedule_refresh()
+        return result
+
+    # -- diagnostics ------------------------------------------------------
+
+    def dump_raw(self) -> dict[str, Any]:
+        return self.client.dump_raw()
+
+
+# Backwards-compatible alias (older code/tests referenced this name).
+ZeekrSmsCoordinator = ZeekrCoordinator

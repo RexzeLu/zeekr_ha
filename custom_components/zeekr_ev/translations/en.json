@@ -2,92 +2,76 @@
   "config": {
     "step": {
       "user": {
-        "title": "Login Method",
-        "description": "Choose how to log in to Zeekr",
+        "title": "Zeekr account login",
+        "description": "Enter the phone number registered with the Zeekr app. An SMS verification code will be sent to it.\n{detail}",
         "data": {
-          "login_type": "Login Method"
-        }
-      },
-      "sms_phone": {
-        "title": "SMS Login",
-        "description": "Enter your phone number",
-        "data": {
-          "region_code": "Region Code",
-          "phone": "Phone Number"
+          "region_code": "Country / region code",
+          "phone": "Phone number"
         }
       },
       "sms_code": {
-        "title": "Verify Code",
-        "description": "SMS code sent to {phone}",
+        "title": "Enter verification code",
+        "description": "A verification code was sent to {phone}.\n{detail}",
         "data": {
-          "sms_code": "SMS Code"
+          "sms_code": "SMS verification code"
         }
       },
-      "credentials": {
-        "title": "Email Login",
-        "data": {
-          "username": "Email",
-          "password": "Password",
-          "country_code": "Country Code",
-          "hmac_access_key": "HMAC Access Key (optional)",
-          "hmac_secret_key": "HMAC Secret Key (optional)",
-          "password_public_key": "Password Public Key (optional)",
-          "prod_secret": "Prod Secret (optional)",
-          "vin_key": "VIN Key (optional)",
-          "vin_iv": "VIN IV (optional)"
-        }
+      "reauth_confirm": {
+        "title": "Sign in again",
+        "description": "The stored credentials for {phone} have expired. Request a new verification code to continue.\n{detail}"
       }
     },
     "error": {
-      "send_sms_failed": "Failed to send SMS",
-      "login_failed": "Login failed",
-      "invalid_base64": "Invalid Base64 format"
+      "phone_required": "Please enter a phone number",
+      "code_required": "Please enter the verification code",
+      "cannot_connect": "Cannot reach the Zeekr service: {detail}",
+      "sms_failed": "Could not send the verification code: {detail}",
+      "invalid_auth": "Login failed: {detail}",
+      "unknown": "Unexpected error"
     },
     "abort": {
-      "already_configured": "Already configured"
+      "already_configured": "This phone number is already configured",
+      "reauth_successful": "Signed in again successfully"
     }
   },
   "options": {
     "step": {
-      "user": {
-        "title": "Reconfigure Zeekr Account",
-        "description": "Update your Zeekr credentials and integration settings.",
+      "init": {
+        "title": "Zeekr integration options",
         "data": {
-          "username": "Username",
-          "password": "Password",
-          "country_code": "Country code",
           "polling_interval": "Polling interval (minutes)",
-          "hmac_access_key": "HMAC access key",
-          "hmac_secret_key": "HMAC secret key",
-          "password_public_key": "Password public key",
-          "prod_secret": "Prod secret",
-          "vin_key": "VIN key",
-          "vin_iv": "VIN IV",
-          "drive_side": "Drive side",
-          "use_local_api": "Use local API (custom_components/zeekr_ev_api)"
-        },
-        "data_description": {
-          "use_local_api": "Enable to use the local zeekr_ev_api folder from custom_components. Disable to use an installed package (pip)."
+          "enable_commands": "Allow sending control commands",
+          "seat_duration": "Seat heating / ventilation duration (minutes)",
+          "ac_duration": "Air conditioning duration (minutes)",
+          "steering_wheel_duration": "Steering wheel heating duration (minutes)"
+        }
+      }
+    }
+  },
+  "services": {
+    "refresh": {
+      "name": "Refresh vehicle data",
+      "description": "Re-query the vehicle list and status immediately.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Config entry",
+          "description": "Only refresh this Zeekr account. Leave empty for all."
         }
       }
     },
-    "error": {
-      "auth": "Username/Password is wrong.",
-      "invalid_base64_hmac_access_key": "HMAC access key must be base64 encoded.",
-      "invalid_length_min_32_hmac_access_key": "HMAC access key must be at least 32 characters.",
-      "invalid_base64_hmac_secret_key": "HMAC secret key must be base64 encoded.",
-      "invalid_length_min_32_hmac_secret_key": "HMAC secret key must be at least 32 characters.",
-      "invalid_base64_password_public_key": "Password public key must be base64 encoded.",
-      "invalid_length_min_200_password_public_key": "Password public key must be at least 200 characters.",
-      "invalid_base64_prod_secret": "Prod secret must be base64 encoded.",
-      "invalid_length_exact_32_prod_secret": "Prod secret must be exactly 32 characters.",
-      "invalid_base64_vin_key": "VIN key must be base64 encoded.",
-      "invalid_length_exact_16_vin_key": "VIN key must be exactly 16 characters.",
-      "invalid_base64_vin_iv": "VIN IV must be base64 encoded.",
-      "invalid_length_exact_16_vin_iv": "VIN IV must be exactly 16 characters."
-    },
-    "abort": {
-      "reconfigure_successful": "Reconfiguration successful."
+    "dump_raw_status": {
+      "name": "Dump raw status payload",
+      "description": "Return the raw gateway JSON (tokens removed) for debugging field mapping.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Config entry",
+          "description": "Only dump this Zeekr account. Leave empty for all."
+        },
+        "vin": {
+          "name": "VIN",
+          "description": "Only dump this vehicle. Leave empty for all vehicles."
+        }
+      }
     }
   }
 }

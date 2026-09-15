@@ -1,1 +1,1 @@
-zeekr-ev-api
+pycryptodome>=3.20.0

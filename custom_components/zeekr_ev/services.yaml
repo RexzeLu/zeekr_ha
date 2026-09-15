@@ -1,29 +1,20 @@
-get_trip_trackpoints:
-  name: Get Trip Trackpoints
-  description: Fetch detailed GPS trackpoints for a specific trip from the journey log.
+refresh:
   fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: zeekr_ev
+
+dump_raw_status:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: zeekr_ev
     vin:
-      name: VIN
-      description: Vehicle Identification Number
-      required: true
+      required: false
       example: "LXXXA1SXXXN022XXX"
       selector:
         text:
-    trip_id:
-      name: Trip ID
-      description: The trip ID from the journey log
-      required: true
-      example: 3
-      selector:
-        number:
-          min: 0
-          mode: box
-    trip_report_time:
-      name: Trip Report Time
-      description: The reportTime timestamp from the trip (milliseconds since epoch)
-      required: true
-      example: 1769492206000
-      selector:
-        number:
-          min: 0
-          mode: box

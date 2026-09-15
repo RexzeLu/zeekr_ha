@@ -1,12 +1,33 @@
-__pycache__
+# --- Python ---
+__pycache__/
+*.py[cod]
 pythonenv*
 .python-version
 .coverage
 venv
 .venv
 .cookiecutter.json
-notes
-.devcontainer
-.vscode
 .mypy_cache
+.pytest_cache
 *.bak
+
+# --- Tooling ---
+.workbuddy/
+.devcontainer/
+.vscode/
+notes/
+
+# --- Debug / reverse-engineering scratch artifacts (never tracked) ---
+# These are produced while poking at the Zeekr app / API and must not be
+# committed. Keep the patterns anchored to the repo root where practical.
+/_*.png
+/_*.jpg
+/_*.jpeg
+/_*.b64
+/_*_b64.txt
+/_fix_*.py
+/_dump*.json
+/_debug/
+/flows.json
+scratch/
+_scratch/

@@ -1,11 +1,10 @@
-"""Button platform for Zeekr EV API Integration."""
+"""Button platform — one-shot remote actions."""
 
 from __future__ import annotations
 
-import logging
+from dataclasses import dataclass
+from typing import Any
 
-
-from datetime import datetime
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -13,9 +12,36 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
 from .coordinator import ZeekrCoordinator
-from .entity import ZeekrEntity
+from .entity import VehicleEntityManager, ZeekrEntity
 
-_LOGGER = logging.getLogger(__name__)
+
+@dataclass(frozen=True)
+class ButtonSpec:
+    key: str
+    name: str
+    icon: str
+    command: str
+    service_id: str
+    setting: dict[str, Any]
+
+
+BUTTON_SPECS: tuple[ButtonSpec, ...] = (
+    ButtonSpec(
+        "flash_blinkers", "闪灯", "mdi:car-light-alert",
+        "start", "RHL",
+        {"serviceParameters": [{"key": "rhl", "value": "light-flash"}]},
+    ),
+    ButtonSpec(
+        "honk_flash", "鸣笛并闪灯", "mdi:bullhorn",
+        "start", "RHL",
+        {"serviceParameters": [{"key": "rhl", "value": "horn-light-flash"}]},
+    ),
+    ButtonSpec(
+        "parking_comfort_off", "关闭驻车舒适", "mdi:car-seat-cooler",
+        "stop", "PCM",
+        {"serviceParameters": [{"key": "parking_comfortable", "value": "false"}]},
+    ),
+)
 
 
 async def async_setup_entry(
@@ -23,142 +49,47 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Zeekr button entities."""
+    """Set up the button platform."""
     coordinator: ZeekrCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    entities: list[ButtonEntity] = []
-    for vehicle in coordinator.vehicles:
-        entities.append(ZeekrForceUpdateButton(coordinator, vehicle.vin))
-        entities.append(ZeekrFlashBlinkersButton(coordinator, vehicle.vin))
-        entities.append(ZeekrHonkFlashButton(coordinator, vehicle.vin))
-        entities.append(ZeekrParkingComfortDisableButton(coordinator, vehicle.vin))
+    def factory(vin: str) -> list[ButtonEntity]:
+        entities: list[ButtonEntity] = [
+            ZeekrCommandButton(coordinator, vin, spec) for spec in BUTTON_SPECS
+        ]
+        entities.append(ZeekrRefreshButton(coordinator, vin))
+        return entities
 
-    async_add_entities(entities)
-
-
-class ZeekrFlashBlinkersButton(ZeekrEntity, ButtonEntity):
-    """Button to Flash Blinkers."""
-
-    _attr_icon = "mdi:car-light-alert"
-
-    def __init__(self, coordinator: ZeekrCoordinator, vin: str) -> None:
-        """Initialize the button."""
-        super().__init__(coordinator, vin)
-        self._attr_name = "Flash Blinkers"
-        self._attr_unique_id = f"{vin}_flash_blinkers"
-
-    async def async_press(self) -> None:
-        """Handle the button press."""
-        vehicle = self.coordinator.get_vehicle_by_vin(self.vin)
-        if not vehicle:
-            return
-
-        command = "start"
-        service_id = "RHL"
-        setting = {
-            "serviceParameters": [
-                {
-                    "key": "rhl",
-                    "value": "light-flash"
-                }
-            ]
-        }
-
-        await self.coordinator.async_inc_invoke()
-        await self.hass.async_add_executor_job(
-            vehicle.do_remote_control, command, service_id, setting
-        )
-        _LOGGER.info("Flash blinkers requested for vehicle %s", self.vin)
+    VehicleEntityManager(hass, entry, coordinator, async_add_entities, factory).start()
 
 
-class ZeekrHonkFlashButton(ZeekrEntity, ButtonEntity):
-    """Button to Honk Horn and Flash Blinkers."""
+class ZeekrCommandButton(ZeekrEntity, ButtonEntity):
+    """A button that fires a fixed remote-control command."""
 
-    _attr_icon = "mdi:bullhorn"
-
-    def __init__(self, coordinator: ZeekrCoordinator, vin: str) -> None:
-        """Initialize the button."""
-        super().__init__(coordinator, vin)
-        self._attr_name = "Honk Horn and Flash Blinkers"
-        self._attr_unique_id = f"{vin}_honk_flash"
+    def __init__(self, coordinator: ZeekrCoordinator, vin: str,
+                 spec: ButtonSpec) -> None:
+        super().__init__(coordinator, vin, spec.key)
+        self._attr_name = spec.name
+        self._attr_icon = spec.icon
+        self._spec = spec
 
     async def async_press(self) -> None:
-        """Handle the button press."""
-        vehicle = self.coordinator.get_vehicle_by_vin(self.vin)
-        if not vehicle:
-            return
-
-        command = "start"
-        service_id = "RHL"
-        setting = {
-            "serviceParameters": [
-                {
-                    "key": "rhl",
-                    "value": "horn-light-flash"
-                }
-            ]
-        }
-
-        await self.coordinator.async_inc_invoke()
-        await self.hass.async_add_executor_job(
-            vehicle.do_remote_control, command, service_id, setting
+        await self.send_command(
+            self._spec.command, self._spec.service_id, self._spec.setting
         )
-        _LOGGER.info("Honk horn and flash blinkers requested for vehicle %s", self.vin)
 
 
-class ZeekrParkingComfortDisableButton(ZeekrEntity, ButtonEntity):
-    """Button to Disable Parking Comfort."""
+class ZeekrRefreshButton(ZeekrEntity, ButtonEntity):
+    """Force an immediate poll (and vehicle rediscovery)."""
 
-    _attr_icon = "mdi:car-seat-cooler"
-
-    def __init__(self, coordinator: ZeekrCoordinator, vin: str) -> None:
-        """Initialize the button."""
-        super().__init__(coordinator, vin)
-        self._attr_name = "Disable Parking Comfort"
-        self._attr_unique_id = f"{vin}_parking_comfort_disable"
-
-    async def async_press(self) -> None:
-        """Handle the button press."""
-        vehicle = self.coordinator.get_vehicle_by_vin(self.vin)
-        if not vehicle:
-            return
-
-        command = "stop"
-        service_id = "PCM"
-        setting = {
-            "serviceParameters": [
-                {
-                    "key": "parking_comfortable",
-                    "value": "false"
-                }
-            ]
-        }
-
-        await self.coordinator.async_inc_invoke()
-        await self.hass.async_add_executor_job(
-            vehicle.do_remote_control, command, service_id, setting
-        )
-        _LOGGER.info("Parking comfort disabled for vehicle %s", self.vin)
-
-
-class ZeekrForceUpdateButton(ZeekrEntity, ButtonEntity):
-    """Button to Poll vehicle data."""
-
+    _attr_name = "立即刷新"
     _attr_icon = "mdi:refresh"
 
     def __init__(self, coordinator: ZeekrCoordinator, vin: str) -> None:
-        """Initialize the button."""
-        super().__init__(coordinator, vin)
-        self._attr_name = "Poll Vehicle Data"
-        self._attr_unique_id = f"{vin}_poll_vehicle_data"
+        super().__init__(coordinator, vin, "refresh")
 
     @property
-    def state(self):
-        """Return the latest poll time/date as the button state."""
-        return self.coordinator.latest_poll_time
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"last_poll": self.coordinator.latest_poll_time}
 
     async def async_press(self) -> None:
-        """Handle the button press."""
-        _LOGGER.info("Poll vehicle data requested for vehicle %s", self.vin)
-        self.coordinator.latest_poll_time = datetime.now().isoformat()
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.async_force_discovery()
