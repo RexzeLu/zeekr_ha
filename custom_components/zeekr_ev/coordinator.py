@@ -12,6 +12,7 @@ Wraps :class:`~.api_sms.ZeekrSmsApiClient` and exposes:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -38,12 +39,17 @@ from .const import (
     DEFAULT_STEERING_WHEEL_DURATION,
     DOMAIN,
 )
+from .optimistic import OptimisticStore, assign, dig
 from .request_stats import ZeekrRequestStats
 
 _LOGGER = logging.getLogger(__name__)
 
-# Seconds to wait after a command before re-polling the car.
-COMMAND_REFRESH_DELAY = 12
+# Seconds to wait after a command before re-polling the car.  The car has to be
+# woken up by the command and needs a while to report back, so a single short
+# re-poll normally still returns the *old* state -- which silently undid the
+# optimistic update and made successful commands look like failures.  Poll a few
+# times instead, spread over a minute.
+COMMAND_REFRESH_DELAYS: tuple[int, ...] = (10, 30, 60)
 
 
 class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
@@ -68,7 +74,9 @@ class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             hass, self._handle_daily_reset, hour=0, minute=0, second=0
         )
         self.entry.async_on_unload(self._unsub_reset)
-        self._unsub_refresh = None
+        self._unsub_refreshes: list[Callable[[], None]] = []
+        self.entry.async_on_unload(self._cancel_scheduled_refreshes)
+        self._optimistic = OptimisticStore()
 
     # -- options ----------------------------------------------------------
 
@@ -140,7 +148,7 @@ class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 "集成会继续重试。"
             )
         self.latest_poll_time = datetime.now().isoformat()
-        return data
+        return self._optimistic.apply(data)
 
     async def async_force_discovery(self) -> None:
         """Re-query the vehicle list (used by the refresh service/button)."""
@@ -151,21 +159,19 @@ class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
     @callback
     def set_optimistic(self, vin: str, *path: str, value: Any) -> None:
-        """Write a value into the cached state and notify listeners.
+        """Reflect a just-issued command in the UI immediately.
 
-        Keeps the UI responsive between issuing a command and the next poll.
+        The car is cloud-polled, so the first poll after a command usually still
+        carries the *previous* state.  The intended value is handed to the
+        :class:`~.optimistic.OptimisticStore`, which re-applies it on subsequent
+        polls until the car reports something different.
         """
-        if not self.data or vin not in self.data:
+        if not self.data or vin not in self.data or not path:
             return
-        node: Any = self.data[vin]
-        for step in path[:-1]:
-            if not isinstance(node, dict):
-                return
-            node = node.setdefault(step, {})
-        if not isinstance(node, dict) or not path:
-            return
-        node[path[-1]] = value
-        self.async_update_listeners()
+        cached = self.data[vin]
+        self._optimistic.set(vin, tuple(path), value, dig(cached, tuple(path)))
+        if assign(cached, tuple(path), value):
+            self.async_update_listeners()
 
     # -- commands ---------------------------------------------------------
 
@@ -187,23 +193,35 @@ class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
     async def async_send_and_refresh(self, vin: str, command: str,
                                      service_id: str,
                                      setting: dict[str, Any],
-                                     delay: int = COMMAND_REFRESH_DELAY
+                                     delay: int | None = None
                                      ) -> dict[str, Any]:
         """Send a command then re-poll shortly afterwards."""
         result = await self.async_send_command(vin, command, service_id, setting)
         self._schedule_refresh(delay)
         return result
 
-    def _schedule_refresh(self, delay: int) -> None:
-        if self._unsub_refresh is not None:
-            self._unsub_refresh()
-            self._unsub_refresh = None
+    def _schedule_refresh(self, delay: int | None = None) -> None:
+        """Queue re-polls after a command.
+
+        Defaults to :data:`COMMAND_REFRESH_DELAYS` because the car has to wake up
+        and report back; pass an explicit ``delay`` to poll just once.
+        """
+        self._cancel_scheduled_refreshes()
+        delays = (delay,) if delay is not None else COMMAND_REFRESH_DELAYS
 
         async def _refresh(_now) -> None:
-            self._unsub_refresh = None
             await self.async_request_refresh()
 
-        self._unsub_refresh = async_call_later(self.hass, delay, _refresh)
+        for seconds in delays:
+            self._unsub_refreshes.append(
+                async_call_later(self.hass, seconds, _refresh)
+            )
+
+    @callback
+    def _cancel_scheduled_refreshes(self) -> None:
+        for unsub in self._unsub_refreshes:
+            unsub()
+        self._unsub_refreshes.clear()
 
     async def async_set_charge_plan(self, vin: str, start_time: str,
                                     end_time: str, command: str,
@@ -232,6 +250,10 @@ class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         return result
 
     # -- diagnostics ------------------------------------------------------
+
+    def pending_optimistic(self) -> dict[str, Any]:
+        """Intended values still waiting for the car to confirm them."""
+        return self._optimistic.pending()
 
     def dump_raw(self) -> dict[str, Any]:
         return self.client.dump_raw()

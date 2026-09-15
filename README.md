@@ -117,9 +117,9 @@
 | 12V 电瓶 | `maintenanceStatus.mainBatteryStatus.chargeLevel` / `.voltage` |
 | 续航 | `electricVehicleStatus.distanceToEmptyOnBatteryOnly`（实测 321 km，与 App 显示一致） |
 | 胎压 | `maintenanceStatus.tyreStatus{Driver,Passenger,DriverRear,PassengerRear}`，单位 kPa |
-| 坐标量纲 | 定点整数，已实测为「度 × 3,600,000」；解析器会自动探测 3.6e6 / 1e7 / 1e6 / 已是度数四种情况 |
+| 坐标量纲 | 定点整数，实测为「度 × 3,600,000」（换算出广州市区，**已与实车位置核对**）；解析器会自动探测 3.6e6 / 1e7 / 1e6 / 已是度数四种情况 |
 | 定位可信 | `basicVehicleStatus.position.posCanBeTrusted` |
-| 锁车状态 | `*LockStatus*` 系列：`0` = 未锁，非 `0` = 已锁 |
+| 锁车状态 | `*LockStatus*` 系列：`0` = 未锁，非 `0` = 已锁（**已与车端「已锁」状态核对**，未锁方向待实测） |
 | 充电口盖 | `chargeLidAcStatus` / `chargeLidDcAcStatus`：`1` = 打开，`0`/`2` = 关闭 |
 | 预计充满 | `timeToFullyCharged`，空闲时返回哨兵值 `2047`，已按「未知」处理 |
 | 遮阳帘 / 天窗 | `curtainPos` / `sunroofPos` / `sunCurtainRearPos` 返回 `101` 表示本车未配备 |
@@ -134,6 +134,27 @@
 ### 位置不更新
 
 位置需要车辆状态接口返回 GPS 字段。若 `position` 始终为空，请用上面的方式导出报文确认字段名。
+
+## 控制指令的行为
+
+极氪的车是**云端唤醒**的：HA 把指令发给网关后，车要先被唤醒，再上报新状态，
+整个过程通常 10~30 秒。因此集成采用「乐观更新 + 等车确认」的策略：
+
+1. 指令下发成功后**立刻**在 HA 里显示目标状态（锁车键按下去马上变「已锁」）；
+2. 之后按 10 / 30 / 60 秒各重新拉取一次状态；
+3. 只要车端上报的状态和「下发指令前的值」不同，就立刻改用车端状态；
+4. 若 90 秒内车始终没有确认，则放弃目标值、回落到车端状态 ——
+   这时说明指令没被接受，HA 不会一直骗你。
+
+所以指令下发后 UI 短暂显示目标状态、随后又跳回去，意味着**指令没有生效**；
+如果诊断文件里的 `pending_commands` 长时间非空，就是这种情况。
+
+### 指令下发失败
+
+- 确认「配置 → 选项 → 允许下发控制指令」是开启的；
+- 查看 HA 日志里 `custom_components.zeekr_ev` 的报错，网关拒绝时会带上
+  `serviceId` 和返回的 `msg`；
+- 车端拒绝常见原因：车辆正在行驶、电量过低、该车型不支持此功能。
 
 ## 架构
 

@@ -58,6 +58,10 @@ async def async_get_config_entry_diagnostics(
         ],
         "commands_enabled": coordinator.commands_enabled,
         "last_poll": coordinator.latest_poll_time,
+        # Values issued by a command but not yet confirmed by the car.  Handy
+        # when a command "does not stick": if the entry is still here after the
+        # TTL, the car never accepted (or never reported) the change.
+        "pending_commands": coordinator.pending_optimistic(),
         "payload_summary": {
             vin: describe_payload(state.get("raw")) for vin, state in data.items()
         },
