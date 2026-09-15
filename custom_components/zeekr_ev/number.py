@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.components.number import NumberEntity, NumberMode, RestoreNumber
+from homeassistant.components.number import NumberMode, RestoreNumber
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE
 from homeassistant.core import HomeAssistant
@@ -31,8 +31,12 @@ async def async_setup_entry(
     ).start()
 
 
-class ZeekrChargingLimitNumber(ZeekrEntity, NumberEntity, RestoreNumber):
-    """Target state of charge."""
+class ZeekrChargingLimitNumber(ZeekrEntity, RestoreNumber):
+    """Target state of charge.
+
+    ``RestoreNumber`` already extends ``NumberEntity``; listing both would make
+    the MRO inconsistent.
+    """
 
     _attr_name = "充电上限"
     _attr_icon = "mdi:battery-charging-high"

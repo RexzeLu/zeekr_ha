@@ -697,7 +697,8 @@ class ZeekrSmsApiClient:
         vehicles: list[ZeekrVehicle] = []
         seen: set[str] = set()
         for entry in entries:
-            meta = extract_vehicle_meta(entry)
+            # A few endpoints return bare VIN strings instead of objects.
+            meta = {"vin": entry} if isinstance(entry, str) else extract_vehicle_meta(entry)
             vin = meta.get("vin")
             if not vin or vin in seen:
                 continue
