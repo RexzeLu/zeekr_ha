@@ -25,7 +25,13 @@ from homeassistant.helpers.update_coordinator import (
     UpdateFailed,
 )
 
-from .api_sms import ZeekrApiError, ZeekrAuthError, ZeekrSmsApiClient, ZeekrVehicle
+from .api_sms import (
+    ZeekrApiError,
+    ZeekrAuthError,
+    ZeekrError,
+    ZeekrSmsApiClient,
+    ZeekrVehicle,
+)
 from .const import (
     CONF_AC_DURATION,
     CONF_ENABLE_COMMANDS,
@@ -147,8 +153,35 @@ class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 "未获取到任何车辆数据：账号下可能没有车辆，或列表接口暂时不可用。"
                 "集成会继续重试。"
             )
+            if not self.client.has_gw3_token:
+                _LOGGER.warning(
+                    "同时没有 GW3 访问令牌，远程指令（车锁 / 空调等）不可用。"
+                    "原因：%s",
+                    self.client.gateway_summary().get("gw3_login_error"),
+                )
         self.latest_poll_time = datetime.now().isoformat()
+        self._async_persist_tokens()
         return self._optimistic.apply(data)
+
+    def _async_persist_tokens(self) -> None:
+        """Store rotated gateway tokens back into the config entry.
+
+        Only the login-time snapshot used to be persisted, so a token rotated
+        mid-session was lost on restart — and a stale refresh token can be
+        rejected outright.  The config-entry update listener ignores data-only
+        updates, so this does not trigger a reload.
+        """
+        tokens = {
+            key: value
+            for key, value in self.client.get_token_storage().items()
+            if value and self.entry.data.get(key) != value
+        }
+        if not tokens:
+            return
+        _LOGGER.debug("已持久化更新的令牌字段: %s", sorted(tokens))
+        self.hass.config_entries.async_update_entry(
+            self.entry, data={**self.entry.data, **tokens}
+        )
 
     async def async_force_discovery(self) -> None:
         """Re-query the vehicle list (used by the refresh service/button)."""
@@ -186,9 +219,14 @@ class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         """Send a remote-control command (raises on failure)."""
         self._ensure_commands_enabled()
         await self.request_stats.async_inc_invoke()
-        return await self.client.async_do_remote_control(
-            vin, command, service_id, setting
-        )
+        try:
+            return await self.client.async_do_remote_control(
+                vin, command, service_id, setting
+            )
+        except ZeekrError as err:
+            # HomeAssistantError surfaces the text in the UI; a bare Exception
+            # only ever showed up as "unknown error".
+            raise HomeAssistantError(str(err)) from err
 
     async def async_send_and_refresh(self, vin: str, command: str,
                                      service_id: str,
@@ -229,9 +267,12 @@ class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                                     bc_temp: bool = False) -> dict[str, Any]:
         self._ensure_commands_enabled()
         await self.request_stats.async_inc_invoke()
-        result = await self.client.async_set_charge_plan(
-            vin, start_time, end_time, command, bc_cycle, bc_temp
-        )
+        try:
+            result = await self.client.async_set_charge_plan(
+                vin, start_time, end_time, command, bc_cycle, bc_temp
+            )
+        except ZeekrError as err:
+            raise HomeAssistantError(str(err)) from err
         self._schedule_refresh()
         return result
 
@@ -242,10 +283,13 @@ class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                                     ) -> dict[str, Any]:
         self._ensure_commands_enabled()
         await self.request_stats.async_inc_invoke()
-        result = await self.client.async_set_travel_plan(
-            vin, command, start_time, scheduled_time,
-            ac_preconditioning, steering_wheel_heating,
-        )
+        try:
+            result = await self.client.async_set_travel_plan(
+                vin, command, start_time, scheduled_time,
+                ac_preconditioning, steering_wheel_heating,
+            )
+        except ZeekrError as err:
+            raise HomeAssistantError(str(err)) from err
         self._schedule_refresh()
         return result
 

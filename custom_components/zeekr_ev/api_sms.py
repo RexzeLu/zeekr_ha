@@ -88,6 +88,33 @@ class ZeekrApiError(ZeekrError):
     """Non-auth API failure (network, business rejection, ...)."""
 
 
+def _response_brief(result: Any) -> dict[str, Any]:
+    """Summarise a gateway response without leaking credentials.
+
+    Tokens are only ever reported as *which fields the backend answered with*,
+    which is what makes a silent GW3 login failure debuggable.
+    """
+    if not isinstance(result, dict):
+        return {"code": None, "msg": str(result)[:200], "data_keys": None}
+    data = result.get("data")
+    return {
+        "code": result.get("code"),
+        "msg": result.get("msg") or result.get("message"),
+        "data_keys": sorted(data) if isinstance(data, dict) else None,
+    }
+
+
+def _pick(data: Any, *keys: str) -> Any:
+    """First non-empty value among ``keys``."""
+    if not isinstance(data, dict):
+        return None
+    for key in keys:
+        value = data.get(key)
+        if value:
+            return value
+    return None
+
+
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
@@ -174,6 +201,14 @@ class ZeekrSmsApiClient:
         self._vehicle_data: dict[str, dict[str, Any]] = {}
         self._raw_payloads: dict[str, Any] = {}
         self._gw3_available = False
+        # GW3 (SNCTSP) is the only gateway that accepts remote-control writes,
+        # so its login result is kept verbatim-ish: a silent failure here is
+        # exactly what later shows up as "缺少 GW3 访问令牌".
+        self._gw3_login: dict[str, Any] | None = None
+        self._gw3_login_error: str | None = None
+        # Which gateway actually served the data (diagnostics only).
+        self._status_source: dict[str, str] = {}
+        self._vehicle_list_source: str | None = None
 
     # -- token persistence ------------------------------------------------
 
@@ -233,6 +268,24 @@ class ZeekrSmsApiClient:
             if vehicle.vin == vin:
                 return vehicle
         return None
+
+    # -- gateway state ----------------------------------------------------
+
+    @property
+    def has_gw3_token(self) -> bool:
+        """Whether remote control can be attempted at all."""
+        return bool(self._new_access_token)
+
+    def gateway_summary(self) -> dict[str, Any]:
+        """Gateway health for the diagnostics dump (never includes tokens)."""
+        return {
+            "gw3_available": self._gw3_available,
+            "gw3_has_token": self.has_gw3_token,
+            "gw3_login": self._gw3_login,
+            "gw3_login_error": self._gw3_login_error,
+            "vehicle_list_source": self._vehicle_list_source,
+            "status_source": dict(self._status_source),
+        }
 
     # -- signing / gateway plumbing --------------------------------------
 
@@ -536,27 +589,65 @@ class ZeekrSmsApiClient:
             "Authorization": token or "",
         }
 
-    async def snc_login(self) -> dict[str, Any]:
-        result = await self._gw3(
-            "POST", "/ms-user-auth/v1.0/auth/login",
-            payload={
-                "loginDeviceType": 1,
-                "identityType": 5,
-                "loginSystem": "ios",
-                "loginDeviceId": self._device_id,
-                "token": self._jwt_token or "",
-                "loginPhoneBrand": "Apple",
-            },
-            extra={"Authorization": self._jwt_token or ""},
-            retry=False,
-        )
-        if result.get("code") == _SUCCESS:
-            data = result.get("data") or {}
-            self._new_access_token = data.get("accessToken") or self._new_access_token
-            self._new_refresh_token = (
-                data.get("refreshToken") or self._new_refresh_token
+    def _absorb_gw3_tokens(self, result: dict[str, Any], what: str) -> bool:
+        """Store the tokens of a successful GW3 auth response."""
+        data = result.get("data") or {}
+        token = _pick(data, "accessToken", "access_token", "tokenValue")
+        if not token:
+            self._gw3_login_error = (
+                f"{what} 成功但响应里没有 accessToken（data 字段: "
+                f"{sorted(data) if isinstance(data, dict) else type(data).__name__}）"
             )
-            self._gw3_available = True
+            _LOGGER.error("%s —— 远程指令将不可用", self._gw3_login_error)
+            return False
+
+        self._new_access_token = token
+        self._new_refresh_token = (
+            _pick(data, "refreshToken", "refresh_token") or self._new_refresh_token
+        )
+        self._gw3_available = True
+        self._gw3_login_error = None
+        _LOGGER.debug("GW3 %s 成功", what)
+        return True
+
+    async def snc_login(self) -> dict[str, Any]:
+        """Log into the SNCTSP (GW3) gateway with the GW1 JWT.
+
+        Never raises: the response is recorded either way, because a silent
+        failure here is what later surfaces as a bare "缺少 GW3 访问令牌" when
+        the user tries to control the car.
+        """
+        try:
+            result = await self._gw3(
+                "POST", "/ms-user-auth/v1.0/auth/login",
+                payload={
+                    "loginDeviceType": 1,
+                    "identityType": 5,
+                    "loginSystem": "ios",
+                    "loginDeviceId": self._device_id,
+                    "token": self._jwt_token or "",
+                    "loginPhoneBrand": "Apple",
+                },
+                extra={"Authorization": self._jwt_token or ""},
+                retry=False,
+            )
+        except ZeekrError as exc:
+            self._gw3_login_error = f"GW3 登录请求失败: {exc}"
+            _LOGGER.error("%s —— 远程指令将不可用", self._gw3_login_error)
+            return {"code": None, "msg": str(exc)}
+
+        self._gw3_login = _response_brief(result)
+        if result.get("code") == _SUCCESS:
+            if not self._absorb_gw3_tokens(result, "登录"):
+                self._gw3_login = _response_brief(result)
+        else:
+            self._gw3_login_error = (
+                "GW3 登录被拒绝: code={code} msg={msg}".format(
+                    code=result.get("code"),
+                    msg=result.get("msg") or result.get("message"),
+                )
+            )
+            _LOGGER.error("%s —— 远程指令将不可用", self._gw3_login_error)
         return result
 
     async def snc_refresh(self) -> bool:
@@ -576,17 +667,52 @@ class ZeekrSmsApiClient:
                 extra={"Authorization": self._jwt_token or ""},
                 retry=False,
             )
-        except ZeekrError:
+        except ZeekrError as exc:
+            _LOGGER.debug("GW3 token 刷新失败: %s", exc)
             return False
         if result.get("code") == _SUCCESS:
-            data = result.get("data") or {}
-            self._new_access_token = data.get("accessToken") or self._new_access_token
-            self._new_refresh_token = (
-                data.get("refreshToken") or self._new_refresh_token
-            )
-            self._gw3_available = True
-            return True
+            return self._absorb_gw3_tokens(result, "token 刷新")
+        _LOGGER.debug(
+            "GW3 token 刷新被拒绝: code=%s msg=%s",
+            result.get("code"), result.get("msg"),
+        )
         return False
+
+    async def async_ensure_gw3_token(self) -> bool:
+        """Make sure a GW3 token exists, renewing it when possible.
+
+        Called before every command: the token may simply not have been issued
+        at login time (or may have expired since), and the GW1 JWT is enough to
+        ask for a fresh one.
+        """
+        if self._new_access_token:
+            return True
+
+        try:
+            if await self.snc_refresh():
+                return True
+        except ZeekrError as exc:  # pragma: no cover - snc_refresh swallows
+            _LOGGER.debug("GW3 token 刷新异常: %s", exc)
+
+        # A fresh GW2 token lets the GW3 login be retried from scratch.
+        try:
+            await self.refresh_gw2()
+        except ZeekrError as exc:
+            _LOGGER.debug("GW2 token 刷新失败: %s", exc)
+        await self.snc_login()
+        return bool(self._new_access_token)
+
+    async def _require_gw3_token(self) -> None:
+        """Guarantee a GW3 token or explain precisely why we cannot."""
+        if self._new_access_token or await self.async_ensure_gw3_token():
+            return
+        reason = self._gw3_login_error or "原因未知（GW3 登录未返回任何错误信息）"
+        raise ZeekrAuthError(
+            "无法下发指令：缺少 GW3 访问令牌，自动获取也失败。"
+            f"最后一次 GW3 登录结果：{reason}。"
+            "可先尝试「设置 → 设备与服务 → 极氪 → 重新认证」重新登录；"
+            "若仍失败请下载诊断信息反馈，其中的 gw3 段包含网关原始返回码。"
+        )
 
     async def get_vehicle_list_gw3(self) -> list[dict[str, Any]]:
         result = await self._gw3(
@@ -653,10 +779,13 @@ class ZeekrSmsApiClient:
         if not self._access_token:
             raise ZeekrAuthError("网关2登录失败：未返回 accessToken")
 
-        try:
-            await self.snc_login()
-        except ZeekrError as exc:
-            _LOGGER.warning("GW3 登录失败（将回退到 GW2）: %s", exc)
+        await self.snc_login()
+        if not self._new_access_token:
+            _LOGGER.warning(
+                "GW3 登录没有取得令牌：车辆状态会回退到 GW2，但远程指令（车锁 / "
+                "空调等）将无法下发。原因：%s",
+                self._gw3_login_error,
+            )
 
         await self.async_get_vehicle_list()
         return {"ok": True, "vehicles": [v.vin for v in self._vehicles]}
@@ -669,6 +798,9 @@ class ZeekrSmsApiClient:
         """
         if not self._jwt_token:
             raise ZeekrAuthError("缺少登录凭据，请重新登录")
+        # GW3 is the only gateway that accepts commands; re-acquire its token on
+        # every start-up (the JWT alone is enough) instead of only at login.
+        await self.async_ensure_gw3_token()
         try:
             await self.async_get_vehicle_list()
         except ZeekrAuthError:
@@ -683,8 +815,11 @@ class ZeekrSmsApiClient:
 
     async def async_get_vehicle_list(self) -> list[ZeekrVehicle]:
         entries: list[dict[str, Any]] = []
+        source: str | None = None
         try:
             entries = await self.get_vehicle_list_gw3()
+            if entries:
+                source = "gw3"
         except ZeekrAuthError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -693,10 +828,13 @@ class ZeekrSmsApiClient:
         if not entries and self._access_token:
             try:
                 entries = await self.get_vehicle_list_gw2()
+                if entries:
+                    source = "gw2"
             except ZeekrAuthError:
                 raise
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.debug("GW2 vehicle list failed: %s", exc)
+        self._vehicle_list_source = source
 
         vehicles: list[ZeekrVehicle] = []
         seen: set[str] = set()
@@ -724,6 +862,7 @@ class ZeekrSmsApiClient:
                 if raw:
                     for key, value in (await self._gw3_extras(vin)).items():
                         raw.setdefault(key, value)
+                    self._status_source[vin] = "gw3"
                     return raw
             except ZeekrAuthError:
                 raise
@@ -733,6 +872,7 @@ class ZeekrSmsApiClient:
         try:
             raw = await self.get_vehicle_status_gw2(vin)
             if raw:
+                self._status_source[vin] = "gw2"
                 return raw
         except ZeekrAuthError:
             raise
@@ -797,8 +937,7 @@ class ZeekrSmsApiClient:
                                       service_id: str,
                                       setting: dict[str, Any]) -> dict[str, Any]:
         """Send a remote-control command via GW3."""
-        if not self._new_access_token:
-            raise ZeekrAuthError("缺少 GW3 访问令牌，无法下发指令")
+        await self._require_gw3_token()
         try:
             result = await self._gw3(
                 "POST", "/ms-vehicle-control/api/v1.0/vehicle/control",
@@ -827,6 +966,7 @@ class ZeekrSmsApiClient:
                                     end_time: str, command: str,
                                     bc_cycle: bool = False,
                                     bc_temp: bool = False) -> dict[str, Any]:
+        await self._require_gw3_token()
         return await self._gw3(
             "POST", "/ms-app-bff/api/v3.0/veh/charge/plan",
             payload={
@@ -844,6 +984,7 @@ class ZeekrSmsApiClient:
                                     ac_preconditioning: bool = True,
                                     steering_wheel_heating: bool = False
                                     ) -> dict[str, Any]:
+        await self._require_gw3_token()
         return await self._gw3(
             "POST", "/ms-app-bff/api/v3.0/veh/travel/plan",
             payload={
@@ -863,7 +1004,7 @@ class ZeekrSmsApiClient:
         return {
             "device_id": self._device_id,
             "phone": self._phone,
-            "gw3_available": self._gw3_available,
+            "gateways": self.gateway_summary(),
             "vehicles": [
                 {"vin": v.vin, **v.meta} for v in self._vehicles
             ],

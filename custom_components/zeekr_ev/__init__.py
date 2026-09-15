@@ -133,6 +133,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     _async_register_services(hass)
+    hass.data[DOMAIN][_options_snapshot_key(entry.entry_id)] = dict(entry.options)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
 
@@ -148,6 +149,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         hass.data[DOMAIN].pop(entry.entry_id, None)
+        hass.data[DOMAIN].pop(_options_snapshot_key(entry.entry_id), None)
 
     if not hass.data.get(DOMAIN):
         for service in (SERVICE_REFRESH, SERVICE_DUMP_RAW):
@@ -177,8 +179,22 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
+def _options_snapshot_key(entry_id: str) -> str:
+    return f"options::{entry_id}"
+
+
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload when options change."""
+    """Reload when the *options* change.
+
+    Rotated gateway tokens are written back into the entry as well, and
+    reloading the integration every time one is refreshed would be both
+    pointless and disruptive — hence the options snapshot comparison.
+    """
+    key = _options_snapshot_key(entry.entry_id)
+    current = dict(entry.options)
+    if hass.data.get(DOMAIN, {}).get(key) == current:
+        return
+    hass.data.setdefault(DOMAIN, {})[key] = current
     await hass.config_entries.async_reload(entry.entry_id)
 
 

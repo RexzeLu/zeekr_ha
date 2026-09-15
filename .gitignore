@@ -28,6 +28,7 @@ notes/
 /_fix_*.py
 /_dump*.json
 /_debug/
+/_cmp/
 /flows.json
 /config_entry-*.json
 scratch/

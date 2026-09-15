@@ -161,6 +161,9 @@ async def async_get_config_entry_diagnostics(
             }
             for vehicle in coordinator.vehicles
         ],
+        # Remote control is GW3-only; when it is missing, nothing works and
+        # this block says why (login code/msg straight from the gateway).
+        "gateways": coordinator.client.gateway_summary(),
         "commands_enabled": coordinator.commands_enabled,
         "last_poll": coordinator.latest_poll_time,
         # Values issued by a command but not yet confirmed by the car.  Handy
