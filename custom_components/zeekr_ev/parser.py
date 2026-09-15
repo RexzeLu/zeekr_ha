@@ -13,7 +13,7 @@ here, not touching a dozen platform modules.
 Canonical shape (all keys always present, values may be ``None``)::
 
     {
-      "vehicle":  {"vin", "plate", "model", "series", "nickname"},
+      "vehicle":  {"vin", "plate", "model", "series", "brand", "nickname"},
       "battery":  {"soc", "range", "range_20soc", "range_100soc", "charging",
                    "charger_state", "plugged", "power", "voltage", "current",
                    "charge_speed", "remaining_minutes", "limit",
@@ -24,7 +24,8 @@ Canonical shape (all keys always present, values may be ``None``)::
       "climate":  {"inside_temp", "outside_temp", "target_temp", "ac_on",
                    "blower", "defrost", "steering_wheel_heat",
                    "curtain_open", "curtain_open_status", "curtain_pos",
-                   "sunroof_open", "sunroof_pos"},
+                   "sunshade_supported",
+                   "sunroof_open", "sunroof_pos", "sunroof_supported"},
       "air":      {"pm25", "pm25_level", "humidity"},
       "service":  {"days_to_service", "distance_to_service", "warning"},
       "doors":    {"fl", "fr", "rl", "rr", "trunk", "hood"},
@@ -53,6 +54,12 @@ Calibration notes (observed on a real 2026.1.1 install, two vehicles
 * ``position.latitude`` / ``longitude`` are fixed-point integers; the divisor is
   detected at runtime (see :data:`_COORD_DIVISORS`).
 * ``*LockStatus*`` fields read ``0`` when unlocked and non-zero when locked.
+* ``curtainPos`` / ``sunroofPos`` / ``sunCurtainRearPos`` report ``101`` on cars
+  that do not have the part at all (confirmed against a BX1E with no sunshade).
+  Anything above 100 is therefore treated as "not equipped" rather than as a
+  valid position.
+* ``relHumSts`` has been seen at ``103``; out-of-range percentages are reported
+  as unknown instead of being clamped.
 """
 
 from __future__ import annotations
@@ -279,12 +286,40 @@ def _duration_minutes(value: Any) -> float | None:
     return minutes
 
 
-def _percent(value: Any, *, max_value: float = 100.0) -> float | None:
-    """Coerce a 0..100 position/percentage, rejecting sentinels like ``101``."""
+def _percent(value: Any) -> float | None:
+    """Coerce a 0..100 percentage, rejecting out-of-range readings.
+
+    ``relHumSts`` has been observed at ``103``, which is impossible for
+    humidity, so an out-of-range value is reported as "no reading" instead of
+    being silently clamped to a plausible-looking number.
+    """
     number = as_float(value)
-    if number is None or number < 0 or number > max_value:
+    if number is None or number < 0 or number > 100:
         return None
     return number
+
+
+def _resolve_opening(
+    raw_position: Any, raw_status: Any
+) -> tuple[bool | None, float | None, bool | None]:
+    """Resolve a sunshade / sunroof style opening.
+
+    Returns ``(is_open, position, supported)``.
+
+    A ``*Pos`` value above 100 is a "not equipped" sentinel: cars without a
+    sunshade or an opening roof report the very same ``101`` for ``curtainPos``,
+    ``sunroofPos`` and ``sunCurtainRearPos``, and the accompanying
+    ``*OpenStatus`` (``1``) carries no meaning in that case.  Reporting
+    ``supported = False`` lets the cover entity go unavailable rather than
+    claiming a part the car does not have is open.
+    """
+    if raw_position is None:
+        # No position field at all: trust the plain status flag.
+        return _open_state(raw_status, None), None, None
+    position = as_float(raw_position)
+    if position is None or position < 0 or position > 100:
+        return None, None, False
+    return position > 0, position, True
 
 
 # ---------------------------------------------------------------------------
@@ -610,11 +645,28 @@ def _extract_position(index: PayloadIndex, raw: Any) -> dict[str, Any]:
 
 
 _VEHICLE_ALIAS = {
-    "plate": ("plateNo", "plate", "licensePlate", "plateNumber", "carPlate"),
-    "model": ("model", "vehicleModel", "modelName", "carType"),
-    "series": ("series", "seriesName", "vehicleSeries"),
-    "nickname": ("nickname", "vehicleName", "carName", "name", "alias"),
+    "plate": ("plateNo", "plateNum", "plateNumber", "licensePlate", "carPlate",
+              "plate"),
+    "model": ("model", "modelName", "vehicleModel", "vehModel", "carType"),
+    "series": ("series", "seriesName", "seriesCode", "vehicleSeries"),
+    "brand": ("brandName", "brand", "vehicleBrand"),
+    "nickname": ("nickName", "nickname", "vehName", "vehicleName",
+                 "carNickName", "vehicleNickName", "userVehicleName",
+                 "displayName", "carName", "alias", "name"),
 }
+
+
+def _clean_text(value: Any) -> str | None:
+    """Trim a string field, turning blank values into ``None``.
+
+    The backend happily returns ``"plateNo": ""`` for a car without a plate;
+    left as an empty string it is falsy but still looks like real data in the
+    diagnostics (and silently falls through the device-name chain).
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def extract_vehicle_meta(payload: Any) -> dict[str, Any]:
@@ -622,14 +674,31 @@ def extract_vehicle_meta(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
     index = build_index(payload)
-    vin = index.find("vin", "VIN", "vehicleIdentificationNumber")
+    vin = _clean_text(index.find("vin", "VIN", "vehicleIdentificationNumber"))
     return {
         "vin": vin,
-        "plate": index.find(*_VEHICLE_ALIAS["plate"]),
-        "model": index.find(*_VEHICLE_ALIAS["model"]),
-        "series": index.find(*_VEHICLE_ALIAS["series"]),
-        "nickname": index.find(*_VEHICLE_ALIAS["nickname"]),
+        "plate": _clean_text(index.find(*_VEHICLE_ALIAS["plate"])),
+        "model": _clean_text(index.find(*_VEHICLE_ALIAS["model"])),
+        "series": _clean_text(index.find(*_VEHICLE_ALIAS["series"])),
+        "brand": _clean_text(index.find(*_VEHICLE_ALIAS["brand"])),
+        "nickname": _clean_text(index.find(*_VEHICLE_ALIAS["nickname"])),
     }
+
+
+def vehicle_display_name(meta: dict[str, Any] | None) -> str:
+    """Pick a human friendly device name for a vehicle.
+
+    Order matters: the user's own name for the car wins, then the plate, then
+    the model/series.  Falling back to the VIN is a last resort — it used to be
+    hit for every car without a plate, which is why devices showed up named
+    after their VIN.
+    """
+    meta = meta or {}
+    for key in ("nickname", "plate", "model", "series"):
+        value = _clean_text(meta.get(key))
+        if value:
+            return value
+    return _clean_text(meta.get("vin")) or "Zeekr EV"
 
 
 def extract_location(raw: Any) -> dict[str, Any]:
@@ -809,9 +878,13 @@ def normalize_vehicle_data(raw: Any, meta: dict[str, Any] | None = None) -> dict
     }
 
     # -- climate ---------------------------------------------------------
-    curtain_pos = _percent(_lookup(index, "curtain_pos"))
-    sunroof_pos = _percent(_lookup(index, "sunroof_pos"))
     curtain_status = _lookup(index, "curtain_open")
+    curtain_open, curtain_pos, sunshade_supported = _resolve_opening(
+        _lookup(index, "curtain_pos"), curtain_status
+    )
+    sunroof_open, sunroof_pos, sunroof_supported = _resolve_opening(
+        _lookup(index, "sunroof_pos"), _lookup(index, "sunroof_open")
+    )
     canonical["climate"] = {
         "inside_temp": as_float(_lookup(index, "inside_temp")),
         "outside_temp": as_float(_lookup(index, "outside_temp")),
@@ -820,18 +893,20 @@ def normalize_vehicle_data(raw: Any, meta: dict[str, Any] | None = None) -> dict
         "blower": as_bool(_lookup(index, "blower")),
         "defrost": as_bool(_lookup(index, "defrost")),
         "steering_wheel_heat": as_bool(_lookup(index, "steering_wheel_heat")),
-        "curtain_open": _open_state(curtain_status, curtain_pos),
+        "curtain_open": curtain_open,
         "curtain_open_status": curtain_status,
         "curtain_pos": curtain_pos,
-        "sunroof_open": _open_state(_lookup(index, "sunroof_open"), sunroof_pos),
+        "sunshade_supported": sunshade_supported,
+        "sunroof_open": sunroof_open,
         "sunroof_pos": sunroof_pos,
+        "sunroof_supported": sunroof_supported,
     }
 
     # -- air quality / service -------------------------------------------
     canonical["air"] = {
         "pm25": as_float(_lookup(index, "pm25")),
         "pm25_level": as_float(_lookup(index, "pm25_level")),
-        "humidity": as_float(_lookup(index, "humidity")),
+        "humidity": _percent(_lookup(index, "humidity")),
     }
     canonical["service"] = {
         "days_to_service": as_float(_lookup(index, "days_to_service")),

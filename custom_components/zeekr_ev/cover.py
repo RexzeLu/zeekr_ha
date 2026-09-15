@@ -54,6 +54,15 @@ class ZeekrSunshade(ZeekrEntity, CoverEntity):
         super().__init__(coordinator, vin, "sunshade")
 
     @property
+    def available(self) -> bool:
+        # Cars without a sunshade report the "not equipped" sentinel instead of
+        # a position.  Go unavailable rather than claim a part that does not
+        # exist is open.
+        if self.get("climate", "sunshade_supported") is False:
+            return False
+        return super().available
+
+    @property
     def is_closed(self) -> bool | None:
         value = self.get("climate", "curtain_open")
         return None if value is None else (not value)

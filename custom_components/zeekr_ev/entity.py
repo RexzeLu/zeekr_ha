@@ -21,6 +21,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import ZeekrCoordinator
+from .parser import vehicle_display_name
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,11 +33,10 @@ def vehicle_device_info(coordinator: ZeekrCoordinator, vin: str) -> DeviceInfo:
     """Build the HA device entry for a vehicle."""
     vehicle = coordinator.get_vehicle(vin)
     meta: dict[str, Any] = getattr(vehicle, "meta", None) or {}
-    name = meta.get("nickname") or meta.get("plate") or vin
     return DeviceInfo(
         identifiers={(DOMAIN, vin)},
-        name=name,
-        manufacturer="Zeekr",
+        name=vehicle_display_name(meta),
+        manufacturer=meta.get("brand") or "Zeekr",
         model=meta.get("model") or meta.get("series") or "Zeekr EV",
         serial_number=vin,
     )

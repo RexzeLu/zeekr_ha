@@ -47,7 +47,11 @@ from .const import (
     STORAGE_REFRESH_TOKEN,
     STORAGE_USER_ID,
 )
-from .parser import extract_vehicle_meta, normalize_vehicle_data
+from .parser import (
+    extract_vehicle_meta,
+    normalize_vehicle_data,
+    vehicle_display_name,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -127,20 +131,20 @@ def _payload_of(result: Any) -> Any:
 class ZeekrVehicle:
     """A vehicle plus the metadata discovered during login."""
 
-    __slots__ = ("vin", "meta", "data")
+    __slots__ = ("vin", "meta", "data", "raw")
 
-    def __init__(self, vin: str, meta: dict[str, Any] | None = None) -> None:
+    def __init__(self, vin: str, meta: dict[str, Any] | None = None,
+                 raw: dict[str, Any] | None = None) -> None:
         self.vin = vin
         self.meta = dict(meta or {})
         self.data: dict[str, Any] = {}
+        # The untouched vehicle-list entry, kept so the diagnostics download can
+        # show which field every piece of metadata came from.
+        self.raw: dict[str, Any] | None = raw
 
     @property
     def display_name(self) -> str:
-        return (
-            self.meta.get("nickname")
-            or self.meta.get("plate")
-            or self.vin
-        )
+        return vehicle_display_name(self.meta)
 
     @property
     def model(self) -> str:
@@ -698,12 +702,17 @@ class ZeekrSmsApiClient:
         seen: set[str] = set()
         for entry in entries:
             # A few endpoints return bare VIN strings instead of objects.
-            meta = {"vin": entry} if isinstance(entry, str) else extract_vehicle_meta(entry)
+            if isinstance(entry, str):
+                meta: dict[str, Any] = {"vin": entry}
+                raw_entry: dict[str, Any] | None = None
+            else:
+                meta = extract_vehicle_meta(entry)
+                raw_entry = entry
             vin = meta.get("vin")
             if not vin or vin in seen:
                 continue
             seen.add(vin)
-            vehicles.append(ZeekrVehicle(vin, meta))
+            vehicles.append(ZeekrVehicle(vin, meta, raw_entry))
         self._vehicles = vehicles
         return vehicles
 

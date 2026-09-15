@@ -11,7 +11,7 @@
 | 平台 | 说明 |
 | --- | --- |
 | `device_tracker` | 车辆位置（GPS 经纬度） |
-| `sensor` | 电量、续航、总里程、车速、平均能耗、车内/车外温度、空调设定温度、充电功率/电压/电流、预计充满时间、充电上限、12V 电瓶电压/电量、车内 PM2.5/湿度、保养剩余里程/天数、四轮胎压/胎温 |
+| `sensor` | 电量、续航、总里程、车速、平均能耗、车内/车外温度、空调设定温度、充电功率/电压/电流、预计充满时间、充电上限、12V 电瓶电压/电量、保养剩余里程/天数、四轮胎压/胎温 |
 | `binary_sensor` | 充电中、已插枪、四门/后备箱/前机盖、四车窗、胎压报警 |
 | `lock` | 车门锁、充电口盖 |
 | `switch` | 充电、前风挡除霜、方向盘加热、哨兵模式、充电计划、出行计划、出行空调 |
@@ -84,12 +84,28 @@
 ```
 
 `"path": null` 就说明这条别名没匹配上，照着补 `_ALIAS` 即可。
+
+诊断文件还包含 `vehicle_list_raw`（后端返回的车辆列表原始条目），
+车辆名称 / 车牌取错时可以拿它比对字段名。
 诊断文件中的 VIN、车牌等敏感信息请在反馈前自行打码。
 
 ### 两辆车 / 多辆车
 
 后端车辆列表里有多少辆车，集成就会建多少套实体（`VehicleEntityManager` 会在轮询
-发现新车辆时自动补建）。实体 id 以 VIN 区分，建议在 HA 里按车牌重命名设备。
+发现新车辆时自动补建）。实体 id 以 VIN 区分。
+
+### 设备名称
+
+设备名按 `昵称 → 车牌 → 车型 → 系列` 依次取第一个非空值，全部为空时才退回 VIN。
+后端对没有车牌的车会返回 `"plateNo": ""`，空字符串会被当作「没有」处理，
+不再让设备名退化成 VIN。想改成自己的叫法，直接在 HA 里重命名设备即可。
+
+### 车辆不支持的功能
+
+部分车型没有遮阳帘 / 可开启天窗，后端不会省略字段，而是返回哨兵值
+`curtainPos = 101`。集成把 `>100` 的位置识别为「本车未配备」，
+对应的 `cover` 实体会显示为**不可用**（而不是谎报「已打开」）。
+不需要的话可以在设备页把它删掉。
 
 ## 字段校准状态
 
@@ -99,19 +115,21 @@
 | --- | --- |
 | 动力电池 SOC | `electricVehicleStatus.chargeLevel`（**不是** `maintenanceStatus.mainBatteryStatus.chargeLevel`，后者是 12V 电瓶） |
 | 12V 电瓶 | `maintenanceStatus.mainBatteryStatus.chargeLevel` / `.voltage` |
-| 续航 | `electricVehicleStatus.distanceToEmptyOnBatteryOnly` |
+| 续航 | `electricVehicleStatus.distanceToEmptyOnBatteryOnly`（实测 321 km，与 App 显示一致） |
 | 胎压 | `maintenanceStatus.tyreStatus{Driver,Passenger,DriverRear,PassengerRear}`，单位 kPa |
 | 坐标量纲 | 定点整数，已实测为「度 × 3,600,000」；解析器会自动探测 3.6e6 / 1e7 / 1e6 / 已是度数四种情况 |
 | 定位可信 | `basicVehicleStatus.position.posCanBeTrusted` |
 | 锁车状态 | `*LockStatus*` 系列：`0` = 未锁，非 `0` = 已锁 |
 | 充电口盖 | `chargeLidAcStatus` / `chargeLidDcAcStatus`：`1` = 打开，`0`/`2` = 关闭 |
 | 预计充满 | `timeToFullyCharged`，空闲时返回哨兵值 `2047`，已按「未知」处理 |
+| 遮阳帘 / 天窗 | `curtainPos` / `sunroofPos` / `sunCurtainRearPos` 返回 `101` 表示本车未配备 |
 
 以下字段仅依据空载（未充电 / 未开空调）报文推断，仍待实测确认：
 
-- 充电状态码集合 `_CHARGING_ACTIVE` / `_CHARGING_IDLE`
+- 充电状态码集合 `_CHARGING_ACTIVE` / `_CHARGING_IDLE`（只观测到 `chargeSts = 0`）
 - 哨兵模式 `RSM` 的开关取值
-- 遮阳帘 / 天窗位置（实车返回 `101` 与 `*OpenStatus = 1`，暂按「全开」处理）
+- 空调开关：目前取 `airBlowerActive`，`activeStatus` 的含义待确认
+- `relHumSts`（曾出现 `103`，超出湿度范围时按未知处理）
 
 ### 位置不更新
 

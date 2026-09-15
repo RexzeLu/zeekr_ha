@@ -10,7 +10,9 @@ debugging round, so they are asserted explicitly:
 * tyre pressure lives in ``tyreStatus*`` (kPa), not ``tyrePressure*``;
 * GPS coordinates are fixed-point integers (degrees x 3_600_000 here);
 * ``timeToFullyCharged`` reports ``2047`` as a "no estimate" sentinel;
-* ``pm25`` must not be shadowed by ``interiorPM25Level``.
+* ``pm25`` must not be shadowed by ``interiorPM25Level``;
+* ``curtainPos`` / ``sunroofPos`` report ``101`` on cars without those parts;
+* a blank ``plateNo`` used to make the device name fall back to the VIN.
 
 The parser module is loaded straight from its file so the suite runs without a
 Home Assistant installation.
@@ -262,6 +264,106 @@ def test_seat_shape_is_stable(bx1e):
 def test_vehicle_meta_is_passed_through(bx1e):
     assert bx1e["vehicle"]["series"] == "BX1E"
     assert bx1e["vehicle"]["vin"] == VIN_X
+
+
+# ---------------------------------------------------------------------------
+# Sunshade / sunroof: 101 means "this car does not have one"
+# ---------------------------------------------------------------------------
+
+
+def test_sunshade_sentinel_is_not_reported_as_open(bx1e, dc1e):
+    """A parked car with no sunshade used to show up as "open" in HA."""
+    for state in (bx1e, dc1e):
+        assert state["climate"]["curtain_pos"] is None
+        assert state["climate"]["curtain_open"] is None
+        assert state["climate"]["sunshade_supported"] is False
+        assert state["climate"]["sunroof_supported"] is False
+
+
+@pytest.mark.parametrize(
+    "position, expected_open",
+    [("0", False), ("40", True), ("100", True)],
+)
+def test_sunshade_position_when_equipped(position, expected_open):
+    payload = {"additionalVehicleStatus": {"climateStatus": {
+        "curtainPos": position, "curtainOpenStatus": "1"}}}
+    climate = parser.normalize_vehicle_data(payload)["climate"]
+    assert climate["sunshade_supported"] is True
+    assert climate["curtain_pos"] == float(position)
+    assert climate["curtain_open"] is expected_open
+
+
+def test_opening_without_a_position_field_falls_back_to_status():
+    payload = {"climateStatus": {"curtainOpenStatus": "2"}}
+    climate = parser.normalize_vehicle_data(payload)["climate"]
+    assert climate["curtain_open"] is False
+    assert climate["curtain_pos"] is None
+    assert climate["sunshade_supported"] is None
+
+
+# ---------------------------------------------------------------------------
+# Device naming — used to fall back to the VIN for every car without a plate
+# ---------------------------------------------------------------------------
+
+
+def test_vehicle_display_name_priority():
+    assert parser.vehicle_display_name({"nickname": "小白", "plate": "粤A12345",
+                                        "model": "极氪001"}) == "小白"
+    assert parser.vehicle_display_name({"plate": "粤A12345",
+                                        "model": "极氪001"}) == "粤A12345"
+    assert parser.vehicle_display_name({"model": "四座后驱版-001",
+                                        "series": "BX1E"}) == "四座后驱版-001"
+    assert parser.vehicle_display_name({"series": "BX1E"}) == "BX1E"
+
+
+def test_blank_strings_do_not_shadow_the_vin_fallback():
+    """``plateNo: ""`` is falsy but still used to win the name chain."""
+    assert parser.vehicle_display_name(
+        {"nickname": "", "plate": "", "model": "", "series": "", "vin": "LXXX"}
+    ) == "LXXX"
+    assert parser.vehicle_display_name({"vin": "LXXX"}) == "LXXX"
+    assert parser.vehicle_display_name({}) == "Zeekr EV"
+
+
+def test_extract_vehicle_meta_cleans_blank_fields():
+    meta = parser.extract_vehicle_meta(
+        {"vin": "LXXX", "plateNo": "   ", "modelName": "四座后驱版-001"}
+    )
+    assert meta["vin"] == "LXXX"
+    assert meta["plate"] is None
+    assert meta["model"] == "四座后驱版-001"
+    assert parser.vehicle_display_name(meta) == "四座后驱版-001"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"vin": "LXXX", "nickName": "我的极氪"},
+        {"vin": "LXXX", "vehName": "我的极氪"},
+        {"vin": "LXXX", "vehicleNickName": "我的极氪"},
+        {"vin": "LXXX", "carName": "我的极氪"},
+        {"vin": "LXXX", "displayName": "我的极氪"},
+    ],
+)
+def test_extract_vehicle_meta_nickname_variants(entry):
+    assert parser.extract_vehicle_meta(entry)["nickname"] == "我的极氪"
+
+
+def test_extract_vehicle_meta_handles_non_dict():
+    assert parser.extract_vehicle_meta("LXXX") == {}
+
+
+# ---------------------------------------------------------------------------
+# Humidity
+# ---------------------------------------------------------------------------
+
+
+def test_out_of_range_humidity_is_unknown():
+    """``relHumSts`` was observed at 103, which is impossible for humidity."""
+    payload = {"pollutionStatus": {"relHumSts": "103"}}
+    assert parser.normalize_vehicle_data(payload)["air"]["humidity"] is None
+    payload = {"pollutionStatus": {"relHumSts": "75"}}
+    assert parser.normalize_vehicle_data(payload)["air"]["humidity"] == 75.0
 
 
 def test_as_bool_is_tri_state():

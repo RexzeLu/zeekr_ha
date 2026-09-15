@@ -45,6 +45,17 @@ async def async_get_config_entry_diagnostics(
             {"vin": vehicle.vin, **dict(vehicle.meta)}
             for vehicle in coordinator.vehicles
         ],
+        # The untouched vehicle-list entries.  Without these there is no way to
+        # tell whether a missing name/plate is a parser gap or simply not
+        # returned by the backend.
+        "vehicle_list_raw": [
+            {
+                "vin": vehicle.vin,
+                "display_name": vehicle.display_name,
+                "entry": vehicle.raw,
+            }
+            for vehicle in coordinator.vehicles
+        ],
         "commands_enabled": coordinator.commands_enabled,
         "last_poll": coordinator.latest_poll_time,
         "payload_summary": {

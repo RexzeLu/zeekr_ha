@@ -11,7 +11,6 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
-    CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
     PERCENTAGE,
     UnitOfElectricCurrent,
     UnitOfElectricPotential,
@@ -131,16 +130,6 @@ def _build_specs() -> list[SensorSpec]:
             PERCENTAGE, "mdi:car-battery",
         ),
         # -- cabin air / service ---------------------------------------
-        SensorSpec(
-            "pm25", "车内PM2.5", ("air", "pm25"),
-            SensorDeviceClass.PM25, SensorStateClass.MEASUREMENT,
-            CONCENTRATION_MICROGRAMS_PER_CUBIC_METER, "mdi:blur",
-        ),
-        SensorSpec(
-            "humidity", "车内湿度", ("air", "humidity"),
-            SensorDeviceClass.HUMIDITY, SensorStateClass.MEASUREMENT,
-            PERCENTAGE, "mdi:water-percent",
-        ),
         SensorSpec(
             "service_distance", "保养剩余里程", ("service", "distance_to_service"),
             SensorDeviceClass.DISTANCE, None,
