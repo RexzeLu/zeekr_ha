@@ -237,6 +237,22 @@ def _payload_of(result: Any) -> Any:
     return result
 
 
+def _ok_payload(result: Any) -> Any:
+    """Body of a **successful** response, else ``None``.
+
+    Gateways answer failures with an envelope of their own (``code`` / ``msg`` /
+    ``success`` and no ``data``).  Treating that as a payload is how an error
+    once reached the parser and turned every entity into *unknown*, so every
+    consumer guards on this instead of on "is it a non-empty dict".
+    """
+    if not isinstance(result, dict):
+        return None
+    code = str(result.get("code") or "")
+    if code and code not in _SUCCESS_CODES and result.get("success") is not True:
+        return None
+    return _payload_of(result)
+
+
 class ZeekrVehicle:
     """A vehicle plus the metadata discovered during login."""
 
@@ -297,6 +313,9 @@ class ZeekrSmsApiClient:
         self._vehicle_list_source: str | None = None
         # Outcome of the gateways tried by the last remote-control command.
         self._command_attempts: list[dict[str, Any]] = []
+        # How X-VIN is encoded, and whether the alternative was already tried.
+        self._gw3_vin_encrypted = False
+        self._gw3_vin_flipped = False
 
     # -- token persistence ------------------------------------------------
 
@@ -376,6 +395,7 @@ class ZeekrSmsApiClient:
             "gw3_last_request": self._gw3_last_request,
             "gw3_last_rejected": self._gw3_last_rejected,
             "command_attempts": list(self._command_attempts),
+            "gw3_vin_encrypted": self._gw3_vin_encrypted,
         }
 
     # -- signing / gateway plumbing --------------------------------------
@@ -676,7 +696,7 @@ class ZeekrSmsApiClient:
             "GET", "/device-platform/user/vehicle/secure",
             params={"id": self._user_id or "", "needSharedCar": 1},
         )
-        data = _payload_of(result) or {}
+        data = _ok_payload(result) or {}
         return data.get("list", []) if isinstance(data, dict) else []
 
     async def get_vehicle_status_gw2(self, vin: str) -> dict[str, Any]:
@@ -685,7 +705,7 @@ class ZeekrSmsApiClient:
             params={"latest": "Local", "target": "basic%2Cmore",
                     "userId": self._user_id or ""},
         )
-        data = _payload_of(result) or {}
+        data = _ok_payload(result) or {}
         if isinstance(data, dict):
             return data.get("vehicleStatus") or data
         return {}
@@ -722,9 +742,28 @@ class ZeekrSmsApiClient:
             "has_authorization": bool(headers.get("Authorization")),
         }
 
+    def _gw3_auth_headers(self, vin: str | None, token: str | None,
+                          vin_encrypted: bool | None = None
+                          ) -> dict[str, str]:
+        """Extra GW3 headers: the VIN, plus a token when there is one.
+
+        Both are omitted rather than sent blank — the app simply leaves the
+        header out, and an empty-but-present header is not the same request.
+        """
+        extra: dict[str, str] = {}
+        if vin:
+            extra["X-VIN"] = self._gw3_vin_value(vin, vin_encrypted)
+        if token:
+            extra["Authorization"] = self._bearer(token)
+        return extra
+
     async def _gw3(self, method: str, path: str, params: dict | None = None,
-                   payload: Any = None, extra: dict[str, str] | None = None,
-                   retry: bool = True) -> dict[str, Any]:
+                   payload: Any = None, token: str | None = None,
+                   vin: str | None = None, retry: bool = True,
+                   vin_encrypted: bool | None = None) -> dict[str, Any]:
+        # The auth headers are derived here rather than by the caller so that a
+        # retry with a different X-VIN encoding actually changes the request.
+        extra = self._gw3_auth_headers(vin, token, vin_encrypted)
         url = self._with_query(f"{_GW3_BASE}{path}", params)
         headers = self._gw3_headers(method, path, params, payload, extra)
         shape = self._gw3_request_shape(method, path, headers, params, payload)
@@ -741,11 +780,25 @@ class ZeekrSmsApiClient:
             }
         if _looks_like_auth_error(result, status):
             if retry and await self._recover_gw3_session(result):
-                return await self._gw3(method, path, params, payload, extra,
-                                       retry=False)
+                return await self._gw3(method, path, params, payload,
+                                       token=token, vin=vin, retry=False,
+                                       vin_encrypted=vin_encrypted)
             raise ZeekrAuthError(
                 f"GW3 鉴权失败: {result.get('msg') if isinstance(result, dict) else status}"
             )
+        # "Interface not authorized" on an endpoint that carries X-VIN, while
+        # the endpoint without it works: the VIN encoding is the one variable we
+        # control, so spend a single retry on the alternative form.
+        if (retry and vin_encrypted is None and not self._gw3_vin_flipped
+                and _is_forbidden_interface(result)):
+            self._gw3_vin_encrypted = not self._gw3_vin_encrypted
+            self._gw3_vin_flipped = True
+            _LOGGER.warning(
+                "GW3 接口未授权，改用%s X-VIN 重试一次",
+                "AES 加密" if self._gw3_vin_encrypted else "明文",
+            )
+            return await self._gw3(method, path, params, payload,
+                                   token=token, vin=vin, retry=False)
         return result if isinstance(result, dict) else {"code": str(status)}
 
     async def _recover_gw3_session(self, result: Any) -> bool:
@@ -791,19 +844,19 @@ class ZeekrSmsApiClient:
             return ""
         return token if token.lower().startswith("bearer ") else f"Bearer {token}"
 
-    @staticmethod
-    def _gw3_extra(vin: str | None, token: str | None) -> dict[str, str]:
-        """Extra GW3 headers: the encrypted VIN, plus a token when there is one.
+    def _gw3_vin_value(self, vin: str, encrypted: bool | None = None) -> str:
+        """``X-VIN`` in the requested encoding, defaulting to the detected one.
 
-        Both are omitted rather than sent blank — the app simply leaves the
-        header out, and an empty-but-present header is not the same request.
+        The app AES-encrypts the VIN, but an independent Zeekr integration
+        talking to this same SNCTSP gateway sends it verbatim — and every
+        endpoint of ours that *does* carry ``X-VIN`` answers
+        ``079001 接口未被授权`` while the one that does not (the vehicle list)
+        works.  So the data/control calls probe both forms (see :meth:`_gw3`)
+        while the auth calls keep the encoding that is known to log in.
         """
-        extra: dict[str, str] = {}
-        if vin:
-            extra["X-VIN"] = ZeekrSmsApiClient._encrypt_vin(vin)
-        if token:
-            extra["Authorization"] = ZeekrSmsApiClient._bearer(token)
-        return extra
+        if self._gw3_vin_encrypted if encrypted is None else encrypted:
+            return self._encrypt_vin(vin)
+        return vin
 
     def _absorb_gw3_tokens(self, result: dict[str, Any], what: str) -> bool:
         """Store the tokens of a successful GW3 auth response."""
@@ -852,7 +905,7 @@ class ZeekrSmsApiClient:
                 },
                 # No Authorization header here — the app authenticates this call
                 # with the JWT in the body, but it *does* identify the car.
-                extra=self._gw3_extra(self._first_known_vin(), None),
+                vin=self._first_known_vin(), vin_encrypted=True,
                 retry=False,
             )
         except ZeekrError as exc:
@@ -891,7 +944,7 @@ class ZeekrSmsApiClient:
                 },
                 # Mirrors the login call: tokens travel in the body, the request
                 # only carries the encrypted VIN.
-                extra=self._gw3_extra(self._first_known_vin(), None),
+                vin=self._first_known_vin(), vin_encrypted=True,
                 retry=False,
             )
         except ZeekrError as exc:
@@ -947,13 +1000,9 @@ class ZeekrSmsApiClient:
             params={"needSharedCar": "true"},
             # The GW3 access token is the one the app presents once logged in;
             # the GW1 JWT is only the seed used to obtain it.
-            extra={
-                "Authorization": self._bearer(
-                    self._new_access_token or self._jwt_token
-                )
-            },
+            token=self._new_access_token or self._jwt_token,
         )
-        data = _payload_of(result)
+        data = _ok_payload(result)
         if isinstance(data, list):
             return data
         if isinstance(data, dict):
@@ -964,9 +1013,9 @@ class ZeekrSmsApiClient:
         result = await self._gw3(
             "GET", "/ms-vehicle-status/api/v1.0/vehicle/status/latest",
             params={"latest": "false", "target": "new"},
-            extra=self._gw3_extra(vin, self._new_access_token),
+            vin=vin, token=self._new_access_token,
         )
-        data = _payload_of(result)
+        data = _ok_payload(result)
         return data if isinstance(data, dict) else {}
 
     # -- authentication orchestration ------------------------------------
@@ -1132,9 +1181,9 @@ class ZeekrSmsApiClient:
             try:
                 result = await self._gw3(
                     "GET", path, params=params,
-                    extra=self._gw3_extra(vin, self._new_access_token),
+                    vin=vin, token=self._new_access_token,
                 )
-                data = _payload_of(result)
+                data = _ok_payload(result)
                 if isinstance(data, dict) and data:
                     extras[key] = data
             except Exception as exc:  # noqa: BLE001
@@ -1235,7 +1284,7 @@ class ZeekrSmsApiClient:
                     ),
                 },
             },
-            extra=self._gw3_extra(vin, self._new_access_token),
+            vin=vin, token=self._new_access_token,
         )
 
     async def async_do_remote_control(self, vin: str, command: str,
@@ -1292,7 +1341,7 @@ class ZeekrSmsApiClient:
                 "bcCycleActive": bc_cycle,
                 "bcTempActive": bc_temp,
             },
-            extra=self._gw3_extra(vin, self._new_access_token),
+            vin=vin, token=self._new_access_token,
         )
 
     async def async_set_travel_plan(self, vin: str, command: str,
@@ -1310,7 +1359,7 @@ class ZeekrSmsApiClient:
                 "ac": "true" if ac_preconditioning else "false",
                 "bw": "1" if steering_wheel_heating else "0",
             },
-            extra=self._gw3_extra(vin, self._new_access_token),
+            vin=vin, token=self._new_access_token,
         )
 
     # -- diagnostics ------------------------------------------------------

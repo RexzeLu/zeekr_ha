@@ -233,7 +233,7 @@ def test_gw3_transmits_the_exact_bytes_it_signed():
     client, session = _client()
 
     asyncio.run(client._gw3("POST", LOGIN_PATH, payload=LOGIN_PAYLOAD,
-                            extra=_login_extra(), retry=False))
+                            token="jwt-token-value", vin=VIN, retry=False))
 
     call = session.calls[0]
     assert _wire_body(call) == api_sms._json_body(LOGIN_PAYLOAD)
@@ -244,7 +244,7 @@ def test_gw3_body_is_compact_json():
     client, session = _client()
 
     asyncio.run(client._gw3("POST", LOGIN_PATH, payload=LOGIN_PAYLOAD,
-                            extra=_login_extra(), retry=False))
+                            token="jwt-token-value", vin=VIN, retry=False))
 
     body = _wire_body(session.calls[0])
     assert body is not None
@@ -257,7 +257,7 @@ def test_gw3_signature_covers_the_transmitted_body():
     client, session = _client()
 
     asyncio.run(client._gw3("POST", LOGIN_PATH, payload=LOGIN_PAYLOAD,
-                            extra=_login_extra(), retry=False))
+                            token="jwt-token-value", vin=VIN, retry=False))
 
     call = session.calls[0]
     headers = call["headers"]
@@ -276,7 +276,7 @@ def test_gw3_get_carries_no_body_and_is_signed_without_one():
 
     asyncio.run(client._gw3("GET", "/ms-app-bff/api/v3.0/veh/vehicle-list",
                             params={"needSharedCar": "true"},
-                            extra={"Authorization": "jwt-token-value"}))
+                            token="jwt-token-value", vin=VIN))
 
     call = session.calls[0]
     assert _wire_body(call) is None
@@ -327,7 +327,7 @@ def test_gw3_reporting_helpers_do_not_leak_tokens():
     client, _ = _client()
 
     asyncio.run(client._gw3("POST", LOGIN_PATH, payload=LOGIN_PAYLOAD,
-                            extra=_login_extra(), retry=False))
+                            token="jwt-token-value", vin=VIN, retry=False))
 
     shape = client.gateway_summary()["gw3_last_request"]
     assert shape["method"] == "POST"
@@ -352,7 +352,7 @@ def test_gw3_headers_match_the_official_app():
     client, session = _client()
 
     asyncio.run(client._gw3("POST", LOGIN_PATH, payload=LOGIN_PAYLOAD,
-                            extra=_login_extra(), retry=False))
+                            token="jwt-token-value", vin=VIN, retry=False))
 
     headers = session.calls[0]["headers"]
     assert headers["X-APP-ID"] == "ZEEKRCNCH001M0001"
@@ -394,15 +394,15 @@ def test_gw3_extra_prefixes_a_bare_access_token():
     client, _ = _client()
     # The gateway hands the token back already prefixed; it must not be doubled.
     client._new_access_token = "Bearer eyJhbGci"
-    assert client._gw3_extra(VIN, client._new_access_token)["Authorization"] == (
+    assert client._gw3_auth_headers(VIN, client._new_access_token)["Authorization"] == (
         "Bearer eyJhbGci"
     )
     client._new_access_token = "eyJhbGci"
-    assert client._gw3_extra(VIN, client._new_access_token)["Authorization"] == (
+    assert client._gw3_auth_headers(VIN, client._new_access_token)["Authorization"] == (
         "Bearer eyJhbGci"
     )
     # Without a known VIN the header is simply left out.
-    assert "X-VIN" not in client._gw3_extra(None, "t")
+    assert "X-VIN" not in client._gw3_auth_headers(None, "t")
 
 
 def test_gw3_rejected_request_is_kept_for_diagnostics():
@@ -413,7 +413,7 @@ def test_gw3_rejected_request_is_kept_for_diagnostics():
     })
 
     asyncio.run(client._gw3("POST", LOGIN_PATH, payload=LOGIN_PAYLOAD,
-                            extra=_login_extra(), retry=False))
+                            token="jwt-token-value", vin=VIN, retry=False))
 
     rejected = client.gateway_summary()["gw3_last_rejected"]
     assert rejected["path"] == LOGIN_PATH
@@ -424,7 +424,7 @@ def test_gw3_rejected_request_is_kept_for_diagnostics():
     client._session = _FakeSession({"code": "000000", "data": []})
     asyncio.run(client._gw3("GET", "/ms-vehicle-status/api/v1.0/vehicle/status/latest",
                             params={"latest": "false", "target": "new"},
-                            extra={"X-VIN": "encrypted", "Authorization": "gw3-token"}))
+                            vin=VIN, token="gw3-token"))
     summary = client.gateway_summary()
     assert summary["gw3_last_request"]["method"] == "GET"
     assert summary["gw3_last_rejected"]["path"] == LOGIN_PATH
@@ -503,7 +503,7 @@ def test_remote_control_uses_the_snctsp_control_endpoint():
 
 def test_remote_control_falls_back_to_the_gw2_telematics_pipe():
     client, session = _command_client([
-        {"code": "079001", "msg": "[SDK]此接口未被授权，无法访问!"},
+        {"code": "079025", "msg": "Signature authentication failed."},
         {"code": "1000", "msg": "操作成功"},
     ])
 
@@ -521,7 +521,7 @@ def test_remote_control_falls_back_to_the_gw2_telematics_pipe():
     # The trail keeps both hops, so a diagnostics dump shows why it moved on.
     summary = client.gateway_summary()["command_attempts"]
     assert [item["gateway"] for item in summary] == ["gw3", "gw2"]
-    assert summary[0]["code"] == "079001"
+    assert summary[0]["code"] == "079025"
     assert summary[1]["code"] == "1000"
 
 
@@ -580,3 +580,30 @@ def test_displaced_session_logs_in_again_and_retries_the_command():
     assert urls[2].endswith("/ms-remote-control/v1.0/remoteControl/control")
     # The renewed token is what the retry went out with.
     assert client._new_access_token == "Bearer fresh-token"
+
+
+def test_forbidden_interface_flips_the_vin_encoding_once():
+    """``079001`` on an X-VIN endpoint: retry with the other VIN form.
+
+    Every endpoint carrying ``X-VIN`` answered "interface not authorized" while
+    the one without it worked, so the encoding is the variable to test — and it
+    is tested exactly once per process, not on every poll.
+    """
+    client, session = _client([
+        {"code": "079001", "msg": "[SDK]此接口未被授权，无法访问!"},
+        {"code": "000000", "data": {"additionalVehicleStatus": {}}},
+    ])
+
+    result = asyncio.run(client._gw3(
+        "GET", "/ms-vehicle-status/api/v1.0/vehicle/status/latest",
+        params={"latest": "false", "target": "new"},
+        vin=VIN, token="gw3-token",
+    ))
+
+    assert result["code"] == "000000"
+    assert len(session.calls) == 2
+    first = session.calls[0]["headers"]["X-VIN"]
+    second = session.calls[1]["headers"]["X-VIN"]
+    assert first == VIN            # plain first …
+    assert second != VIN           # … encrypted on the retry
+    assert client.gateway_summary()["gw3_vin_encrypted"] is True
