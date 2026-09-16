@@ -241,6 +241,8 @@ class ZeekrSmsApiClient:
         # Which gateway actually served the data (diagnostics only).
         self._status_source: dict[str, str] = {}
         self._vehicle_list_source: str | None = None
+        # Outcome of the gateways tried by the last remote-control command.
+        self._command_attempts: list[dict[str, Any]] = []
 
     # -- token persistence ------------------------------------------------
 
@@ -319,6 +321,7 @@ class ZeekrSmsApiClient:
             "status_source": dict(self._status_source),
             "gw3_last_request": self._gw3_last_request,
             "gw3_last_rejected": self._gw3_last_rejected,
+            "command_attempts": list(self._command_attempts),
         }
 
     # -- signing / gateway plumbing --------------------------------------
@@ -1097,34 +1100,98 @@ class ZeekrSmsApiClient:
 
     # -- remote control ---------------------------------------------------
 
+    def _telematics_body(self, command: str, service_id: str,
+                         setting: dict[str, Any]) -> dict[str, Any]:
+        """Body for the classic ECARX/Geely "telematics" write pipe.
+
+        ``{command, serviceId, serviceParameters}`` is the essential part; the
+        surrounding fields mirror the shape the sibling Geely integration sends
+        (``creator`` / ``timestamp`` / ``userId``, plus an optional
+        ``operationScheduling`` window for timed runs such as pre-conditioning).
+        """
+        body: dict[str, Any] = {
+            "command": command,
+            "creator": "tc",
+            "serviceId": service_id,
+            "serviceParameters": list(setting.get("serviceParameters") or []),
+            "timestamp": _ts(),
+        }
+        if self._user_id:
+            body["userId"] = self._user_id
+        duration = setting.get("duration")
+        if duration is not None:
+            body["operationScheduling"] = {
+                "duration": int(duration),
+                "interval": 0,
+                "occurs": 1,
+                "recurrentOperation": False,
+            }
+        return body
+
+    async def _command_via_gw2(self, vin: str, command: str, service_id: str,
+                               setting: dict[str, Any]) -> dict[str, Any]:
+        """``PUT /remote-control/vehicle/telematics/{VIN}``.
+
+        GW2 already serves the ``/remote-control/`` family for us (that is where
+        vehicle status comes from), and this is the write path of the same pipe
+        on the ECARX platform the Zeekr backend is built on.
+        """
+        return await self._gw2(
+            "PUT", f"/remote-control/vehicle/telematics/{vin}",
+            payload=self._telematics_body(command, service_id, setting),
+        )
+
+    async def _command_via_gw3(self, vin: str, command: str, service_id: str,
+                               setting: dict[str, Any]) -> dict[str, Any]:
+        """SNCTSP variant.
+
+        Kept as a second attempt: the gateway rejected this path with 404 when
+        it was sent as POST, and an APISIX route that only matches one verb
+        answers 404 too — so the verb is worth varying before giving up on it.
+        """
+        await self._require_gw3_token()
+        return await self._gw3(
+            "PUT", "/ms-vehicle-control/api/v1.0/vehicle/control",
+            payload=self._telematics_body(command, service_id, setting),
+            extra=self._gw3_extra(vin, self._new_access_token),
+        )
+
     async def async_do_remote_control(self, vin: str, command: str,
                                       service_id: str,
                                       setting: dict[str, Any]) -> dict[str, Any]:
-        """Send a remote-control command via GW3."""
-        await self._require_gw3_token()
-        try:
-            result = await self._gw3(
-                "POST", "/ms-vehicle-control/api/v1.0/vehicle/control",
-                payload={
-                    "command": command,
-                    "serviceId": service_id,
-                    "serviceParameters": setting.get("serviceParameters", []),
-                },
-                extra=self._gw3_extra(vin, self._new_access_token),
-            )
-        except ZeekrAuthError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise ZeekrApiError(f"指令下发失败({service_id}): {exc}") from exc
+        """Send a remote-control command, reporting which gateway took it."""
+        # Recorded as we go, so the diagnostics keep the trail even on success.
+        attempts: list[dict[str, Any]] = []
+        self._command_attempts = attempts
+        failures: list[str] = []
+        for name, sender in (("gw2", self._command_via_gw2),
+                             ("gw3", self._command_via_gw3)):
+            try:
+                result = await sender(vin, command, service_id, setting)
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"{name}: {exc}")
+                attempts.append({"gateway": name, "error": str(exc)})
+                continue
 
-        if result.get("code") != _SUCCESS:
-            raise ZeekrApiError(
-                "车辆拒绝了指令 {sid}: {msg}".format(
-                    sid=service_id,
-                    msg=result.get("msg") or result.get("code"),
-                )
+            code = result.get("code")
+            accepted = str(code) == _SUCCESS or result.get("success") is True
+            attempts.append({
+                "gateway": name,
+                "code": code,
+                "msg": result.get("msg") or result.get("message"),
+            })
+            if accepted:
+                _LOGGER.debug("指令 %s 经 %s 被接受", service_id, name)
+                return {**result, "gateway": name}
+            failures.append(f"{name}: {result.get('msg') or code}")
+
+        raise ZeekrApiError(
+            "车辆拒绝了指令 {sid}（依次尝试 {tried}）：{why}".format(
+                sid=service_id,
+                tried=" → ".join(item["gateway"] for item in attempts),
+                why="；".join(failures),
             )
-        return result
+        )
 
     async def async_set_charge_plan(self, vin: str, start_time: str,
                                     end_time: str, command: str,

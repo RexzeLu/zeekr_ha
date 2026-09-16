@@ -28,6 +28,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 _ROOT = Path(__file__).resolve().parents[1]
 _PKG_DIR = _ROOT / "custom_components" / "zeekr_ev"
 
@@ -116,13 +118,24 @@ class _FakeRequest:
 
 
 class _FakeSession:
-    def __init__(self, body: dict):
-        self._response = _FakeResponse(body)
+    """Records the kwargs aiohttp would receive.
+
+    ``body`` may be a single dict (returned for every call) or a list, which is
+    consumed one entry per request — needed to exercise the transport fallback.
+    """
+
+    def __init__(self, body):
+        self._bodies = list(body) if isinstance(body, list) else None
+        self._single = None if self._bodies else body
         self.calls: list[dict] = []
 
     def request(self, method, url, **kwargs):
         self.calls.append({"method": method, "url": url, **kwargs})
-        return _FakeRequest(self._response)
+        if self._bodies:
+            body = self._bodies[min(len(self.calls) - 1, len(self._bodies) - 1)]
+        else:
+            body = self._single
+        return _FakeRequest(_FakeResponse(body))
 
 
 def _wire_body(call: dict) -> bytes | None:
@@ -415,3 +428,102 @@ def test_gw3_rejected_request_is_kept_for_diagnostics():
     summary = client.gateway_summary()
     assert summary["gw3_last_request"]["method"] == "GET"
     assert summary["gw3_last_rejected"]["path"] == LOGIN_PATH
+
+
+# ---------------------------------------------------------------------------
+# Remote control transport
+# ---------------------------------------------------------------------------
+
+AC_SETTING = {
+    "serviceParameters": [
+        {"key": "AC", "value": "true"},
+        {"key": "AC.temp", "value": "22.0"},
+    ]
+}
+
+
+def _command_client(responses):
+    session = _FakeSession(responses)
+    client = api_sms.ZeekrSmsApiClient(session)
+    client._jwt_token = "jwt-token-value"
+    client._user_id = "uid-1"
+    client._vehicle_data[VIN] = {}
+    client._new_access_token = "gw3-token"
+    return client, session
+
+
+def test_remote_control_body_matches_the_telematics_pipe():
+    client, _ = _command_client({"code": "000000"})
+
+    body = client._telematics_body("start", "ZAF", AC_SETTING)
+    assert body["command"] == "start"
+    assert body["serviceId"] == "ZAF"
+    assert body["serviceParameters"] == AC_SETTING["serviceParameters"]
+    assert body["userId"] == "uid-1"
+    assert body["creator"] == "tc"
+    assert body["timestamp"].isdigit()
+    # Only added when the caller asks for a timed run.
+    assert "operationScheduling" not in body
+
+    timed = client._telematics_body("start", "ZAF", {**AC_SETTING, "duration": 180})
+    assert timed["operationScheduling"] == {
+        "duration": 180, "interval": 0, "occurs": 1, "recurrentOperation": False,
+    }
+
+
+def test_remote_control_uses_the_gw2_telematics_endpoint():
+    """The SNCTSP path 404s; GW2 is where the ``/remote-control/`` pipe lives."""
+    client, session = _command_client({"code": "000000"})
+
+    result = asyncio.run(
+        client.async_do_remote_control(VIN, "start", "ZAF", AC_SETTING)
+    )
+
+    assert result["gateway"] == "gw2"
+    assert len(session.calls) == 1
+    call = session.calls[0]
+    assert call["method"] == "PUT"
+    assert call["url"] == (
+        f"https://api.zeekrline.com/remote-control/vehicle/telematics/{VIN}"
+    )
+    sent = json.loads(_wire_body(call))
+    assert sent["serviceId"] == "ZAF"
+    assert sent["command"] == "start"
+    assert sent["userId"] == "uid-1"
+
+
+def test_remote_control_falls_back_to_gw3():
+    client, session = _command_client([
+        {"code": "00A01", "msg": "404 Not Found"},
+        {"code": "000000", "msg": "ok"},
+    ])
+
+    result = asyncio.run(
+        client.async_do_remote_control(VIN, "start", "ZAF", AC_SETTING)
+    )
+
+    assert result["gateway"] == "gw3"
+    assert len(session.calls) == 2
+    assert session.calls[1]["method"] == "PUT"
+    assert session.calls[1]["url"].endswith(
+        "/ms-vehicle-control/api/v1.0/vehicle/control"
+    )
+
+    # The trail keeps both hops, so a diagnostics dump shows why it moved on.
+    summary = client.gateway_summary()["command_attempts"]
+    assert [item["gateway"] for item in summary] == ["gw2", "gw3"]
+    assert summary[0]["code"] == "00A01"
+    assert summary[1]["code"] == "000000"
+
+
+def test_remote_control_error_names_every_gateway_tried():
+    client, _ = _command_client({"code": "00A01", "msg": "404 Not Found"})
+
+    with pytest.raises(api_sms.ZeekrApiError) as err:
+        asyncio.run(client.async_do_remote_control(VIN, "start", "ZAF", AC_SETTING))
+
+    message = str(err.value)
+    assert "ZAF" in message
+    assert "gw2" in message and "gw3" in message
+    attempts = client.gateway_summary()["command_attempts"]
+    assert [item["gateway"] for item in attempts] == ["gw2", "gw3"]
