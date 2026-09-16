@@ -78,8 +78,21 @@ def _async_guard_against_duplicate_account(
         )
 
 
-def _async_warn_on_shared_vehicles(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Warn when another account already publishes entities for the same car."""
+def _async_guard_against_shared_vehicles(
+    hass: HomeAssistant, entry: ConfigEntry, coordinator: ZeekrCoordinator
+) -> None:
+    """Refuse an entry whose car is already published by another entry.
+
+    Entity ``unique_id``s are ``{vin}_{key}`` — derived from the *car*, not from
+    the account.  Two entries that can both see one car therefore fight over the
+    same ids: Home Assistant keeps the first set and silently drops the second
+    ("Platform zeekr_ev does not generate unique IDs"), after which the loser's
+    entities linger as *restored* ones the UI renders as ``unavailable``.
+
+    That is a confusing way to fail, and it is exactly what happens when someone
+    swaps accounts by *adding* the new one instead of replacing the old — so say
+    it outright, with the step that fixes it.
+    """
     claimed: dict[str, str] = {}
     for other_id, other in hass.data.get(DOMAIN, {}).items():
         if other_id == entry.entry_id or not isinstance(other, ZeekrCoordinator):
@@ -87,15 +100,23 @@ def _async_warn_on_shared_vehicles(hass: HomeAssistant, entry: ConfigEntry) -> N
         for vin in other.vehicle_vins():
             claimed.setdefault(vin, other_id)
 
-    coordinator: ZeekrCoordinator = hass.data[DOMAIN][entry.entry_id]
     shared = [vin for vin in coordinator.vehicle_vins() if vin in claimed]
-    if shared:
-        _LOGGER.warning(
-            "车辆 %s 已由另一个极氪配置项（%s）提供实体，本配置项的对应实体会被 "
-            "Home Assistant 忽略。同一辆车只应保留一个配置项。",
-            ", ".join(shared),
-            ", ".join(sorted({claimed[vin] for vin in shared})),
-        )
+    if not shared:
+        return
+
+    owner_id = claimed[shared[0]]
+    titles = {
+        other.entry_id: other.title
+        for other in hass.config_entries.async_entries(DOMAIN)
+    }
+    raise ConfigEntryError(
+        f"车辆 {', '.join(shared)} 已经由配置项"
+        f"「{titles.get(owner_id, owner_id)}」（{owner_id}）提供实体。"
+        "同一辆车只能交给一个配置项：实体唯一 ID 是按车辆生成的，两个配置项会"
+        "争抢同一组 ID，后者的实体会被 Home Assistant 忽略并长期显示“不可用”。"
+        "如果本配置项是要换用另一个账号，请先到「设置 → 设备与服务 → 极氪」"
+        "删除上面那个配置项，再重新添加。"
+    )
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -134,8 +155,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             raise
         raise ConfigEntryNotReady(f"初始化极氪账户失败: {err}") from err
 
+    try:
+        _async_guard_against_shared_vehicles(hass, entry, coordinator)
+    except ConfigEntryError:
+        # The entry already spent requests on its first refresh; keep the tally.
+        await coordinator.request_stats.async_shutdown()
+        raise
+
     hass.data[DOMAIN][entry.entry_id] = coordinator
-    _async_warn_on_shared_vehicles(hass, entry)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     _async_register_services(hass)

@@ -983,3 +983,40 @@ def test_x_vin_candidates_include_the_shared_car_relation():
     assert adoptable["vin"] is False
     assert adoptable["control:zero-ciphertext"] is False
     assert adoptable["userVehId"] is False
+
+
+def test_a_fallback_acceptance_is_marked_degraded():
+    """``1000 操作成功`` from the GW2 pipe is not a clean success.
+
+    That channel accepts a ``serviceId`` it cannot map and then does nothing, so
+    a command that only succeeded there must not be reported as if the preferred
+    gateway had taken it — otherwise the UI shows a success and the car sits
+    still, which is precisely the "no error but nothing happened" report.
+    """
+    client, _ = _command_client([
+        {"code": "079001", "msg": "[SDK]此接口未被授权，无法访问!"},  # gw3, encrypted
+        {"code": "079001", "msg": "[SDK]此接口未被授权，无法访问!"},  # gw3, plain probe
+        {"code": "1000", "msg": "操作成功"},                         # gw2
+    ])
+
+    result = asyncio.run(
+        client.async_do_remote_control(VIN, "start", "ZAF", AC_SETTING)
+    )
+
+    assert result["gateway"] == "gw2"
+    assert result["degraded"] is True
+    attempts = client.gateway_summary()["command_attempts"]
+    assert [item["gateway"] for item in attempts] == ["gw3", "gw2"]
+    assert attempts[0]["code"] == "079001"
+    assert attempts[1]["code"] == "1000"
+
+
+def test_the_preferred_gateway_is_not_marked_degraded():
+    client, _ = _command_client({"code": "000000", "msg": "ok"})
+
+    result = asyncio.run(
+        client.async_do_remote_control(VIN, "start", "ZAF", AC_SETTING)
+    )
+
+    assert result["gateway"] == "gw3"
+    assert "degraded" not in result

@@ -1634,6 +1634,17 @@ class ZeekrSmsApiClient:
                 "msg": result.get("msg") or result.get("message"),
             })
             if accepted:
+                if failures:
+                    # Only a fallback "accepts" what the primary refused, and the
+                    # GW2 telematics pipe answers ``1000 操作成功`` for commands it
+                    # then silently drops.  Reporting that as a clean success is
+                    # how "no error, but the car did not move" happens.
+                    _LOGGER.warning(
+                        "指令 %s 被 %s 接受，但首选通道被拒（%s）——"
+                        "该通道可能只是收下而不执行，车端不一定会动作",
+                        service_id, name, "；".join(failures),
+                    )
+                    return {**result, "gateway": name, "degraded": True}
                 _LOGGER.debug("指令 %s 经 %s 被接受", service_id, name)
                 return {**result, "gateway": name}
             failures.append(f"{name}: {result.get('msg') or code}")
