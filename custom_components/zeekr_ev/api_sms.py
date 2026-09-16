@@ -127,11 +127,10 @@ _TSP_CODE_CANDIDATES = (
     ("api-gw-toc.zeekrlife.com", "/zeekrlife-app-user/v1/user/tspCode"),
     ("api-gw-toc.zeekrlife.com", "/zeekrlife-mp-auth2/v1/auth/tspCode"),
     ("api-gw-toc.zeekrlife.com", "/zeekr-cuc-idaas-cn/user/tsp/code"),
-    ("gateway-pub-hw-em-cn.zeekrlife.com", "/zeekr-cuc-idaas-cn/user/tspCode"),
-    ("gateway-pub-hw-em-cn.zeekrlife.com", "/zeekr-cuc-idaas/user/tspCode"),
-    ("gateway-pub-hw-em.zeekrlife.com", "/zeekr-cuc-idaas-cn/user/tspCode"),
-    ("gateway-pub-hw-cn.zeekrlife.com", "/zeekr-cuc-idaas-cn/user/tspCode"),
 )
+# The SEA-style hosts (``gateway-pub-hw-em-sg`` and friends) are deliberately
+# absent: ``gateway-pub-hw-em-cn`` / ``-em`` / ``-cn`` were tried and do not even
+# resolve in China, so the regional host cannot be guessed from the SEA name.
 # ``client-id`` values known from the published clients.  The account's own id
 # (handed out by GW2) is preferred — it is the one that describes this user.
 _TSP_CLIENT_IDS = (
@@ -142,19 +141,6 @@ _TSP_CLIENT_IDS = (
 # already told us the current token cannot reach a vehicle interface.  A build
 # that never needs it pays nothing.
 _TSP_CODE_ATTEMPT_LIMIT = 8
-
-# Header knobs that could plausibly move the interface authorisation, cheapest
-# and best-documented first.  ``2.1`` is what a China-specific integration sends
-# for China calls (the published clients send ``2.0``), and the gateway validates
-# ``X-PROJECT-ID`` against a per-region enum, so a China-specific value is worth
-# one login.  Each is judged by whether a vehicle interface answers it.
-_LOGIN_VARIANTS = (
-    ("sig-2.1", {"X-API-SIGNATURE-VERSION": "2.1"}),
-    ("project-ZEEKR_CN", {"X-PROJECT-ID": "ZEEKR_CN"}),
-    ("sig-2.1+ZEEKR_CN", {
-        "X-API-SIGNATURE-VERSION": "2.1", "X-PROJECT-ID": "ZEEKR_CN",
-    }),
-)
 
 # "Decrypt X-VIN failed" — the gateway could not open the ``X-VIN`` header it
 # was given.  The app AES-encrypts the VIN (see :meth:`ZeekrSmsApiClient.
@@ -1491,6 +1477,45 @@ class ZeekrSmsApiClient:
         _LOGGER.warning("登录变体「%s」可以访问车辆接口，已采用该配置", name)
         return True
 
+    def _identity_variants(self) -> list[tuple[str, dict[str, Any]]]:
+        """``identityType``/field combinations worth one login each.
+
+        The same endpoint mints tokens of more than one kind: ``identityType 5``
+        with the GW1 JWT is the legacy pair this integration has always used, and
+        the published new-platform pair is ``identityType 10`` with a
+        ``tspCode``.  China's ``tspCode`` route is published nowhere, so the
+        identifiers this client already holds are tried in that shape instead —
+        and every attempt is judged by whether a vehicle interface answers.
+
+        Header knobs are deliberately *not* here any more: signature version 2.1,
+        ``X-PROJECT-ID: ZEEKR_CN`` and both together were tried and all three came
+        back ``079001``, so the refusal is not driven by anything in the headers.
+        Kept short on purpose — each entry is a real login on an account that
+        allows only one session.
+        """
+        variants: list[tuple[str, dict[str, Any]]] = []
+        for label, value in (
+            ("jwt", self._bearer(self._jwt_token)),
+            ("gw2-token", self._access_token),
+            ("client-id", self._client_id),
+            ("user-id", self._user_id),
+        ):
+            if value:
+                variants.append((f"id10+{label}", {
+                    "identityType": 10,
+                    "identifier": value,
+                    # The identityType-10 shape carries its proof in
+                    # ``identifier``, not in ``token``.
+                    "token": "",
+                }))
+        if self._access_token:
+            # The legacy shape, but proving the session with the GW2 (ecarx)
+            # token instead of the GW1 JWT.
+            variants.append(("id5+gw2-token", {
+                "token": self._bearer(self._access_token),
+            }))
+        return variants
+
     async def _platform_token(self) -> bool:
         """Find a login the vehicle interfaces will actually authorise.
 
@@ -1554,9 +1579,9 @@ class ZeekrSmsApiClient:
 
         # The token is minted either way and the legacy list still needs one, so
         # the last thing we do is put a known-good legacy token back.
-        for name, headers in _LOGIN_VARIANTS:
+        for name, body in self._identity_variants():
             try:
-                if await self._login_variant(name, headers):
+                if await self._login_variant(name, None, body):
                     return True
             except Exception as exc:  # noqa: BLE001 - a probe must not break setup
                 self._platform_chain.append(

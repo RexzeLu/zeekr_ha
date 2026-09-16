@@ -1173,7 +1173,10 @@ def test_tsp_code_probe_records_the_host_and_the_error_body_shape():
     asyncio.run(client._fetch_tsp_code())
 
     attempts = client.gateway_summary()["platform_chain"]
-    assert len(attempts) == api_sms._TSP_CODE_ATTEMPT_LIMIT
+    # One request per candidate — the list is the budget, and dead hosts were
+    # pruned out of it rather than left to fail DNS on every run.
+    assert len(attempts) == len(api_sms._TSP_CODE_CANDIDATES)
+    assert len(attempts) <= api_sms._TSP_CODE_ATTEMPT_LIMIT
     assert attempts[0]["host"] == "api-gw-toc.zeekrlife.com"
     assert attempts[0]["path"].endswith("/user/tspCode")
     assert attempts[0]["got_code"] is False
@@ -1211,3 +1214,26 @@ def test_gw1_asks_as_the_android_client_the_capture_used():
     assert headers["x_ca_sign"]
     assert headers["x_ca_key"] == "APP-SIGN-SECRET-KEY"
     assert headers["device_id"] == "DEV-1"
+
+
+def test_identity_variants_are_bounded_and_skip_empty_values():
+    """Only identities this client actually holds, and only non-empty ones."""
+    client, _ = _client()
+    client._access_token = "gw2-token"
+    client._client_id = None          # nothing to try here
+    client._user_id = "uid-1"
+
+    variants = client._identity_variants()
+    labels = [name for name, _ in variants]
+
+    assert labels == ["id10+jwt", "id10+gw2-token", "id10+user-id", "id5+gw2-token"]
+    for name, body in variants:
+        if name.startswith("id10+"):
+            assert body["identityType"] == 10
+            assert body["identifier"]
+            assert body["token"] == ""
+
+    # Header knobs were tried and refuted — they must not creep back in.
+    for _, body in variants:
+        assert "X-API-SIGNATURE-VERSION" not in body
+        assert "X-PROJECT-ID" not in body
