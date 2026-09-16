@@ -801,7 +801,9 @@ class ZeekrSmsApiClient:
                 "smsCode": sms_code,
                 "channel": 2,
                 "x_ca_time": _ts(),
-                "deviceName": "iPhone13",
+                # Describes the same Android device as the GW1 headers do; it
+                # used to claim an iPhone, which contradicted them.
+                "deviceName": DEVICE_MODEL,
                 "skipSmsCode": "0",
                 "regionCode": region,
                 "ip": "192.168.1.1",

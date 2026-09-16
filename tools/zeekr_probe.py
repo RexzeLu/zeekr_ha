@@ -36,10 +36,12 @@ object), e.g. extracted from ``.storage/core.config_entries`` in a backup.
 from __future__ import annotations
 
 import argparse
+import base64
 import asyncio
 import gzip
 import importlib.util
 import json
+import time
 import logging
 import pathlib
 import ssl
@@ -413,6 +415,57 @@ def cmd_gw1(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _gw2cmd(client, args) -> int:
+    """Does the GW2 control pipe actually validate what we send it?
+
+    It answers ``1000 操作成功`` for everything so far while the car does
+    nothing.  Sending a deliberately bogus ``serviceId`` tells us whether that
+    is the gateway accepting anything, or our parameters being wrong — if a
+    nonsense id is rejected, the real one can be found by comparison.
+    """
+    vin = client._first_known_vin()
+    await client.async_get_vehicle_list()
+    vin = vin or client._first_known_vin()
+    if not vin:
+        print("没有 VIN")
+        return 1
+    path = f"/remote-control/vehicle/telematics/{vin}"
+    probes = (
+        ("bogus（故意无效）", "NO_SUCH_SERVICE",
+         [{"key": "AC", "value": "true"}]),
+        ("ZAF+空参数", "ZAF", []),
+        ("ZAF+AC=true", "ZAF", [{"key": "AC", "value": "true"}]),
+        ("ZAF+AC=true+temp", "ZAF", [{"key": "AC", "value": "true"},
+                                     {"key": "AC.temp", "value": "22.0"}]),
+        ("ZAF+AC=1", "ZAF", [{"key": "AC", "value": "1"}]),
+        ("RCE_2+rce", "RCE_2",
+         [{"key": "rce.conditioner", "value": "start"}]),
+    )
+    for label, service_id, params in probes:
+        body = {
+            "command": "start", "serviceId": service_id,
+            "serviceParameters": params, "creator": "tc",
+            "userId": client._user_id,
+            "timestamp": str(int(time.time() * 1000)),
+        }
+        for method in ("PUT", "POST"):
+            try:
+                result = await client._gw2(method, path, payload=body)
+            except Exception as exc:  # noqa: BLE001
+                print(f"  {label:16s} {method:4s} → {type(exc).__name__}: "
+                      f"{str(exc)[:70]}")
+                continue
+            info = brief(result)
+            print(f"  {label:16s} {method:4s} → {info.get('code')} "
+                  f"{info.get('msg') or ''} | {info.get('top_keys')}")
+    return 0
+
+
+def cmd_gw2cmd(args: argparse.Namespace) -> int:
+    client, _ = build_client(args)
+    return asyncio.run(_gw2cmd(client, args))
+
+
 def cmd_sms_request(args: argparse.Namespace) -> int:
     client, _ = build_client(args)
     result = asyncio.run(client.async_send_sms(args.phone))
@@ -555,8 +608,10 @@ async def _hunt(client, args: argparse.Namespace) -> int:
 
     results = []
     winner = None
-    for label, payload in candidates:
-        name, info, token = await _try_login(client, label, payload)
+    if getattr(args, "skip_identity", False):
+        print("  （--skip-identity：跳过；每个变体登录一次都会顶掉会话）")
+    for label, payload in ([] if getattr(args, "skip_identity", False)
+                           else candidates):
         verdict = {"-": None}
         if token:
             verdict = await _opens_vehicle_interface(client, vin, token)
@@ -601,6 +656,12 @@ async def _hunt(client, args: argparse.Namespace) -> int:
         or client._access_token
 
     print("\n########## 4. 车辆列表 v3.0 vs v4.0（找每车令牌）##########")
+    # Every snc_login invalidates the token minted before it, so the identity
+    # matrix has just displaced the session we are about to measure with.
+    # Re-mint one, otherwise this section only reports "logged in elsewhere".
+    await client.snc_login()
+    probe_token = client._new_access_token or probe_token
+    print(f"  （已重新登录，令牌={redact(probe_token)}）")
     for label, path in (
         ("v3.0", "/ms-app-bff/api/v3.0/veh/vehicle-list"),
         ("v4.0", "/ms-app-bff/api/v4.0/veh/vehicle-list"),
@@ -629,6 +690,9 @@ async def _hunt(client, args: argparse.Namespace) -> int:
                 print(f"      全文: {json.dumps(first, ensure_ascii=False)[:900]}")
 
     print("\n########## 5. 同一令牌下 X-VIN 是不是唯一变量 ##########")
+    await client.snc_login()
+    probe_token = client._new_access_token or probe_token
+    print(f"  （已重新登录，令牌={redact(probe_token)}）")
     matrix = []
     for end_name, path, params in (
         ("vehicle-list", "/ms-app-bff/api/v3.0/veh/vehicle-list",
@@ -674,7 +738,186 @@ def cmd_hunt(args: argparse.Namespace) -> int:
     return asyncio.run(_hunt(client, args))
 
 
+def decode_jwt(token: str | None) -> dict[str, Any]:
+    """Read the claims of a bearer token — no verification, no secrets needed.
+
+    The ``scope`` and ``aud`` claims are exactly what distinguishes a token the
+    vehicle interfaces will accept from one that only opens the vehicle list.
+    """
+    if not token:
+        return {}
+    raw = token[7:] if token.lower().startswith("bearer ") else token
+    parts = raw.split(".")
+    if len(parts) < 2:
+        return {"_raw": f"<not a JWT: {len(raw)} chars>"}
+    try:
+        payload = base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4))
+        claims = json.loads(payload)
+    except Exception as exc:  # noqa: BLE001
+        return {"_error": str(exc)[:80]}
+    keep = ("sub", "userId", "aud", "azp", "scope", "typ", "iss", "acr",
+            "sid", "exp", "iat", "clientId", "client_id", "realm")
+    return {k: v for k, v in claims.items() if k in keep}
+
+
+async def _lab(client, args) -> int:
+    """Which login yields a token the vehicle interfaces accept?
+
+    The JWT handed back by ``ms-user-auth`` came back with ``scope: ""`` and
+    ``aud: user_center_client_phone``, and every authorised interface answers
+    ``079001`` for it while the vehicle list works.  So the question is no longer
+    "which endpoint" but "which login mints a scoped token" — GW1 offers two
+    access codes, and OAuth-style logins usually take a ``scope``.
+    """
+    print("########## Lab：哪条登录能拿到带 scope 的令牌 ##########")
+
+    access = await client.get_access_code()
+    codes = {k: v for k, v in (access.get("data") or {}).items() if v}
+    print(f"  GW1 提供的 accessCode: {sorted(codes)}")
+
+    status_path = "/ms-vehicle-status/api/v1.0/vehicle/status/latest"
+    status_params = {"latest": "", "target": "new"}
+
+    for label, extra_payload in (
+        ("现状（无 scope）", {}),
+        ("scope=all", {"scope": "all"}),
+        ("scope=vehicle", {"scope": "vehicle"}),
+        ("scope=tsp", {"scope": "tsp"}),
+        ("scope=openid", {"scope": "openid"}),
+    ):
+        body = {
+            "credential": "", "identifier": "", "identityType": 5,
+            "loginDeviceId": client._login_device_id, "loginDeviceJgId": "",
+            "loginDeviceType": 1, "loginPhoneBrand": "Android",
+            "loginPhoneModel": "Android SDK built for arm64",
+            "loginSystem": "Android",
+            "token": client._bearer(client._jwt_token),
+        }
+        body.update(extra_payload)
+        try:
+            result = await client._gw3("POST", "/ms-user-auth/v1.0/auth/login",
+                                       payload=body, retry=False,
+                                       vin=client._first_known_vin(),
+                                       vin_encrypted=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  {label:18s} 登录异常: {type(exc).__name__}: {exc}"[:110])
+            continue
+        token = ((result.get("data") or {}).get("accessToken")
+                 if isinstance(result, dict) else None)
+        code = result.get("code")
+        if not token:
+            print(f"  {label:18s} 登录 {code} {result.get('msg') or ''} → 无令牌")
+            continue
+        claims = decode_jwt(token)
+        try:
+            probe = await client._gw3("GET", status_path, params=status_params,
+                                      token=token, vin=None, retry=False)
+            verdict = f"{probe.get('code')} {probe.get('msg') or ''}"
+        except Exception as exc:  # noqa: BLE001
+            verdict = f"{type(exc).__name__}: {exc}"[:60]
+        print(f"  {label:18s} 登录={code} | scope={claims.get('scope')!r} "
+              f"aud={claims.get('aud')} | 状态接口={verdict}")
+
+    print("\n########## Lab：换个 accessCode 重走整条链 ##########")
+    for name in sorted(codes):
+        if name == "YIKAT_NEW":
+            continue
+        try:
+            await client.ecar_login(codes[name])
+        except Exception as exc:  # noqa: BLE001
+            print(f"  {name}: ecar_login 失败 {type(exc).__name__}: {exc}"[:110])
+            continue
+        got = decode_jwt(client._access_token)
+        await client.snc_login()
+        claims = decode_jwt(client._new_access_token)
+        try:
+            probe = await client._gw3("GET", status_path, params=status_params,
+                                      token=client._new_access_token, vin=None,
+                                      retry=False)
+            verdict = f"{probe.get('code')} {probe.get('msg') or ''}"
+        except Exception as exc:  # noqa: BLE001
+            verdict = f"{type(exc).__name__}: {exc}"[:60]
+        print(f"  {name}: GW2 令牌={redact(client._access_token)} | "
+              f"GW3 scope={claims.get('scope')!r} aud={claims.get('aud')} "
+              f"| 状态接口={verdict}")
+    return 0
+
+
+# Where could a TSP-scoped token come from?  The one we hold answers
+# ``aud: user_center_client_phone`` with an empty ``scope``, which explains the
+# vehicle list working while the TSP interfaces refuse it.  These are the
+# plausible exchange routes on both gateways, plus a few read-only probes.
+_SCAN_GW3 = (
+    "/ms-user-auth/v1.0/auth/login",
+    "/ms-user-auth/v1.0/user/tspCode",
+    "/ms-user-auth/v1.0/tspCode",
+    "/ms-user-auth/v1.0/oauth/token",
+    "/ms-user-auth/v1.0/oauth/info",
+    "/ms-user-auth/v1.0/auth/tspCode",
+    "/ms-user-auth/v1.0/user/auth/tspCode",
+    "/ms-app-bff/api/v3.0/veh/vehicle-list",
+    "/ms-vehicle-status/api/v1.0/vehicle/status/latest",
+)
+_SCAN_GW2 = (
+    "/auth/account/session/secure",
+    "/auth/account/info",
+    "/auth/account/tsp/token",
+    "/auth/account/tspCode",
+    "/user/tspCode",
+    "/remote-control/vehicle/status/{vin}",
+    "/remote-control/vehicle/telematics/{vin}",
+    "/ms-vehicle-status/api/v1.0/vehicle/status/latest",
+)
+
+
+async def _scan(client, args) -> int:
+    # A stored token is usually stale: some earlier login will have displaced
+    # it, and without the vehicle list there is no VIN to substitute.
+    await client.async_get_vehicle_list()
+    await client.snc_login()
+    vin = client._first_known_vin() or ""
+    print("########## 端点扫描：找一个能换出 TSP 令牌的路由 ##########")
+    print(f"  VIN={vin} GW3 令牌={redact(client._new_access_token)}")
+
+    for label, runner, paths, params in (
+        ("GW3", client._gw3, _SCAN_GW3, {"latest": "", "target": "new"}),
+        ("GW2", client._gw2, _SCAN_GW2, None),
+    ):
+        print(f"\n--- {label} ---")
+        for path in paths:
+            target = path.replace("{vin}", vin)
+            if "{vin}" in path and not vin:
+                continue
+            try:
+                if label == "GW3":
+                    result = await runner("GET", target, params=params,
+                                          token=client._new_access_token,
+                                          vin=vin, retry=False)
+                else:
+                    result = await runner("GET", target, params=params)
+            except Exception as exc:  # noqa: BLE001
+                print(f"  {target:62s} {type(exc).__name__}: {str(exc)[:60]}")
+                continue
+            info = brief(result)
+            print(f"  {target:62s} {info.get('code')} "
+                  f"{info.get('msg') or ''} | {info.get('top_keys')}")
+    return 0
+
+
+def cmd_scan(args: argparse.Namespace) -> int:
+    client, _ = build_client(args)
+    return asyncio.run(_scan(client, args))
+
+
+def cmd_lab(args: argparse.Namespace) -> int:
+    client, _ = build_client(args)
+    return asyncio.run(_lab(client, args))
+
+
 COMMANDS = {
+    "lab": (cmd_lab, "令牌实验：哪条登录能拿到带 scope 的令牌"),
+    "scan": (cmd_scan, "扫描可能换出 TSP 令牌的路由"),
+    "gw2cmd": (cmd_gw2cmd, "GW2 控制通道是否真的校验 serviceId"),
     "summary": (cmd_summary, "查看本地持有的凭据（不发请求）"),
     "bootstrap": (cmd_bootstrap, "恢复会话 + 车辆列表 + 取 GW3 令牌"),
     "status": (cmd_status, "拉取并解析车辆状态"),
@@ -705,6 +948,9 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("summary")
     sub.add_parser("bootstrap")
+    sub.add_parser("lab", help="哪条登录能拿到带 scope 的令牌")
+    sub.add_parser("scan", help="扫描两个网关上可能换出 TSP 令牌的路由")
+    sub.add_parser("gw2cmd", help="探测 GW2 控制通道是否真的校验 serviceId")
 
     p_status = sub.add_parser("status")
     p_status.add_argument("vin", nargs="?")
@@ -715,7 +961,9 @@ def main(argv: list[str] | None = None) -> int:
     p_routes.add_argument("path", nargs="*", help="额外要试的路径")
     p_routes.add_argument("--host")
 
-    sub.add_parser("hunt")
+    p_hunt = sub.add_parser("hunt")
+    p_hunt.add_argument("--skip-identity", action="store_true",
+                        help="跳过登录身份矩阵（它会反复顶掉会话）")
 
     for name in ("raw", "gw1"):
         p = sub.add_parser(name)
