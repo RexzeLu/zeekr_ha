@@ -204,12 +204,18 @@
   `serviceId` 和返回的 `msg`；
 - 车端拒绝常见原因：车辆正在行驶、电量过低、该车型不支持此功能。
 
+### 指令没有报错但车没反应
+
+网关把指令**收下了**（返回成功码）却没执行，通常是端点或请求体结构不对，
+而不是被拒绝。诊断里的 `gateways.command_attempts` 会列出每个通道的返回码，
+`pending_commands` 非空则说明车端一直没上报目标状态（即指令没生效）。
+
 ### 提示「缺少 GW3 访问令牌，无法下发指令」
 
 GW3 令牌和登录时的 GW1 JWT 是两个独立的凭据，这条报错说明 GW3 令牌没拿到。
 
-> 0.3.9 起指令**优先走 GW2 的 `/remote-control/vehicle/telematics/{VIN}`**，
-> 只有它被拒时才回退到 GW3。因此正常情况下指令已不依赖 GW3 令牌。
+> 0.3.10 起指令优先走 GW3 的 `/ms-remote-control/v1.0/remoteControl/control`，
+> 被拒时才回退到 GW2 的 telematics 管道。
 
 集成会在以下时机自动补拿令牌，正常情况下你不需要做任何事：
 
@@ -256,8 +262,26 @@ GW3 令牌和登录时的 GW1 JWT 是两个独立的凭据，这条报错说明 
 | 网关 | 地址 | 签名 | 用途 |
 | --- | --- | --- | --- |
 | GW1 | `api-gw-toc.zeekrlife.com` | SHA1 排序签名 | 短信验证码、手机号登录（JWT） |
-| GW2 | `api.zeekrline.com` | HMAC-SHA1 | 换取 ecar accessToken、车辆列表/状态、**远程控制指令** |
-| GW3 | `snc-tsp-api.zeekrlife.com` | HMAC-SHA256 + AES 加密 VIN | 车辆列表、最新状态、远程控制（回退） |
+| GW2 | `api.zeekrline.com` | HMAC-SHA1 | 换取 ecar accessToken、车辆列表/状态、指令回退 |
+| GW3 | `snc-tsp-api.zeekrlife.com` | HMAC-SHA256 + AES 加密 VIN | 登录、车辆列表、最新状态、**远程控制指令** |
+
+远程控制端点为 GW3 的 `POST /ms-remote-control/v1.0/remoteControl/control`，
+请求体形如：
+
+```json
+{
+  "command": "start",
+  "serviceId": "ZAF",
+  "setting": {"serviceParameters": [{"key": "AC", "value": "true"}]}
+}
+```
+
+注意 `serviceParameters` **嵌在 `setting` 里**。`serviceId` 取值与 App 一致，
+例如空调 `ZAF`、锁 `RDL`、解锁 `RDU`、车窗天窗遮阳帘 `RWS`、
+鸣笛闪灯 `RHL`、充电 `RCS`。
+
+若该通道被拒，会回退到 GW2 的 `PUT /remote-control/vehicle/telematics/{VIN}`。
+两条通道的尝试结果都会写进诊断的 `gateways.command_attempts`。
 
 代码结构：
 

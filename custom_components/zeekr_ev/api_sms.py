@@ -77,6 +77,9 @@ _GW3_APP_ID = "ZEEKRCNCH001M0001"
 _GW3_APPID_HEADER = "ONEX97FB91F061405"
 
 _SUCCESS = "000000"
+# GW2 (the legacy `api.zeekrline.com` pipe) reports success as "1000"/"操作成功"
+# instead of the "000000" the SNCTSP and GW1 gateways use.
+_SUCCESS_CODES = {_SUCCESS, "1000"}
 
 # Gateway auth error codes / markers that should trigger a reauth.
 _AUTH_CODES = {"401", "40101", "40102", "40106", "40001", "10401"}
@@ -1143,16 +1146,26 @@ class ZeekrSmsApiClient:
 
     async def _command_via_gw3(self, vin: str, command: str, service_id: str,
                                setting: dict[str, Any]) -> dict[str, Any]:
-        """SNCTSP variant.
+        """SNCTSP remote-control endpoint — the one the app actually uses.
 
-        Kept as a second attempt: the gateway rejected this path with 404 when
-        it was sent as POST, and an APISIX route that only matches one verb
-        answers 404 too — so the verb is worth varying before giving up on it.
+        ``/ms-remote-control/v1.0/remoteControl/control`` with
+        ``{command, serviceId, setting:{serviceParameters}}``.  The path/first
+        shape was taken from a working Zeekr integration that authenticates
+        against this very gateway; the earlier ``ms-vehicle-control/...`` path
+        was an invention and 404s.
         """
         await self._require_gw3_token()
         return await self._gw3(
-            "PUT", "/ms-vehicle-control/api/v1.0/vehicle/control",
-            payload=self._telematics_body(command, service_id, setting),
+            "POST", "/ms-remote-control/v1.0/remoteControl/control",
+            payload={
+                "command": command,
+                "serviceId": service_id,
+                "setting": {
+                    "serviceParameters": list(
+                        setting.get("serviceParameters") or []
+                    ),
+                },
+            },
             extra=self._gw3_extra(vin, self._new_access_token),
         )
 
@@ -1164,8 +1177,11 @@ class ZeekrSmsApiClient:
         attempts: list[dict[str, Any]] = []
         self._command_attempts = attempts
         failures: list[str] = []
-        for name, sender in (("gw2", self._command_via_gw2),
-                             ("gw3", self._command_via_gw3)):
+        # GW3 first: that is where the app's control endpoint lives.  The GW2
+        # telematics pipe used to answer "1000 操作成功" and then do nothing, so
+        # it is only a fallback.
+        for name, sender in (("gw3", self._command_via_gw3),
+                             ("gw2", self._command_via_gw2)):
             try:
                 result = await sender(vin, command, service_id, setting)
             except Exception as exc:  # noqa: BLE001
@@ -1173,11 +1189,11 @@ class ZeekrSmsApiClient:
                 attempts.append({"gateway": name, "error": str(exc)})
                 continue
 
-            code = result.get("code")
-            accepted = str(code) == _SUCCESS or result.get("success") is True
+            code = str(result.get("code") or "")
+            accepted = code in _SUCCESS_CODES or result.get("success") is True
             attempts.append({
                 "gateway": name,
-                "code": code,
+                "code": result.get("code"),
                 "msg": result.get("msg") or result.get("message"),
             })
             if accepted:

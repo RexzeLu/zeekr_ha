@@ -471,49 +471,58 @@ def test_remote_control_body_matches_the_telematics_pipe():
     }
 
 
-def test_remote_control_uses_the_gw2_telematics_endpoint():
-    """The SNCTSP path 404s; GW2 is where the ``/remote-control/`` pipe lives."""
+def test_remote_control_uses_the_snctsp_control_endpoint():
+    """``/ms-remote-control/v1.0/remoteControl/control`` — not the invented path.
+
+    The path that used to be hard-coded (``/ms-vehicle-control/api/v1.0/
+    vehicle/control``) was answered with 404.  This one, plus the
+    ``setting.serviceParameters`` nesting, comes from a working Zeekr
+    integration authenticating against the same SNCTSP gateway.
+    """
     client, session = _command_client({"code": "000000"})
 
     result = asyncio.run(
         client.async_do_remote_control(VIN, "start", "ZAF", AC_SETTING)
     )
 
-    assert result["gateway"] == "gw2"
+    assert result["gateway"] == "gw3"
     assert len(session.calls) == 1
     call = session.calls[0]
-    assert call["method"] == "PUT"
+    assert call["method"] == "POST"
     assert call["url"] == (
-        f"https://api.zeekrline.com/remote-control/vehicle/telematics/{VIN}"
+        "https://snc-tsp-api.zeekrlife.com"
+        "/ms-remote-control/v1.0/remoteControl/control"
     )
     sent = json.loads(_wire_body(call))
-    assert sent["serviceId"] == "ZAF"
     assert sent["command"] == "start"
-    assert sent["userId"] == "uid-1"
+    assert sent["serviceId"] == "ZAF"
+    # serviceParameters live under "setting", not at the top level.
+    assert sent["setting"] == {"serviceParameters": AC_SETTING["serviceParameters"]}
+    assert "serviceParameters" not in sent
 
 
-def test_remote_control_falls_back_to_gw3():
+def test_remote_control_falls_back_to_the_gw2_telematics_pipe():
     client, session = _command_client([
-        {"code": "00A01", "msg": "404 Not Found"},
-        {"code": "000000", "msg": "ok"},
+        {"code": "079001", "msg": "[SDK]此接口未被授权，无法访问!"},
+        {"code": "1000", "msg": "操作成功"},
     ])
 
     result = asyncio.run(
         client.async_do_remote_control(VIN, "start", "ZAF", AC_SETTING)
     )
 
-    assert result["gateway"] == "gw3"
+    assert result["gateway"] == "gw2"
     assert len(session.calls) == 2
     assert session.calls[1]["method"] == "PUT"
-    assert session.calls[1]["url"].endswith(
-        "/ms-vehicle-control/api/v1.0/vehicle/control"
+    assert session.calls[1]["url"] == (
+        f"https://api.zeekrline.com/remote-control/vehicle/telematics/{VIN}"
     )
 
     # The trail keeps both hops, so a diagnostics dump shows why it moved on.
     summary = client.gateway_summary()["command_attempts"]
-    assert [item["gateway"] for item in summary] == ["gw2", "gw3"]
-    assert summary[0]["code"] == "00A01"
-    assert summary[1]["code"] == "000000"
+    assert [item["gateway"] for item in summary] == ["gw3", "gw2"]
+    assert summary[0]["code"] == "079001"
+    assert summary[1]["code"] == "1000"
 
 
 def test_remote_control_error_names_every_gateway_tried():
@@ -526,4 +535,4 @@ def test_remote_control_error_names_every_gateway_tried():
     assert "ZAF" in message
     assert "gw2" in message and "gw3" in message
     attempts = client.gateway_summary()["command_attempts"]
-    assert [item["gateway"] for item in attempts] == ["gw2", "gw3"]
+    assert [item["gateway"] for item in attempts] == ["gw3", "gw2"]
