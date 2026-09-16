@@ -449,6 +449,10 @@ class ZeekrSmsApiClient:
             # Only whether it is set — the token itself is a capability secret.
             "vehicle_token_configured": bool(self._vehicle_token),
             "gw3_vin_attempts": list(self._gw3_vin_attempts),
+            # The device profile the session was created with.  Not a secret
+            # (it is a synthetic brand/model/sdk/release string) and the single
+            # most useful field for telling whether the fix took effect.
+            "login_device_id": self._login_device_id,
         }
 
     # -- signing / gateway plumbing --------------------------------------
@@ -844,23 +848,33 @@ class ZeekrSmsApiClient:
             raise ZeekrAuthError(
                 f"GW3 鉴权失败: {result.get('msg') if isinstance(result, dict) else status}"
             )
-        # Two failures point at the X-VIN encoding rather than at permissions:
-        # "decrypt failed" (we sent something it cannot open) and "interface not
-        # authorized" (it may have opened it into the wrong VIN).  Spend exactly
-        # one retry on the other form, and only for calls that did not pin it.
+        # Two failures mention the X-VIN header: "decrypt failed" (we sent
+        # something it cannot open) and "interface not authorized" (it may have
+        # opened it into the wrong VIN).  Spend exactly one request finding out
+        # which encoding the gateway wants — but treat it as a *probe*: it must
+        # not be allowed to poison every later poll, because the alternative is
+        # strictly worse (a plain VIN can never be decrypted at all).
         if (retry and vin_encrypted is None and not self._gw3_vin_flipped
                 and not self._vehicle_token
                 and (_is_vin_decrypt_failure(result)
                      or _is_forbidden_interface(result))):
-            self._gw3_vin_encrypted = not self._gw3_vin_encrypted
+            original = self._gw3_vin_encrypted
+            self._gw3_vin_encrypted = not original
             self._gw3_vin_flipped = True
             _LOGGER.warning(
-                "GW3 拒绝了 X-VIN（%s），改用%s重试一次",
+                "GW3 拒绝了 X-VIN（%s），改用%s重试一次以确认",
                 _response_brief(result).get("msg"),
                 "AES 加密" if self._gw3_vin_encrypted else "明文",
             )
-            return await self._gw3(method, path, params, payload,
-                                   token=token, vin=vin, retry=False)
+            probe = await self._gw3(method, path, params, payload,
+                                    token=token, vin=vin, retry=False)
+            if not (isinstance(probe, dict) and probe.get("code") == _SUCCESS):
+                self._gw3_vin_encrypted = original
+                _LOGGER.warning(
+                    "另一种 X-VIN 编码同样不被接受，恢复为%s",
+                    "AES 加密" if original else "明文",
+                )
+            return probe
         return result if isinstance(result, dict) else {"code": str(status)}
 
     def _record_vin_attempt(self, method: Any, path: Any, encrypted: bool,

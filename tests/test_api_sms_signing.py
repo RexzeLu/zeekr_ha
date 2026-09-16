@@ -780,3 +780,41 @@ def test_token_storage_stamps_the_current_revision():
 
     assert (client.get_token_storage()[api_sms.STORAGE_CREDENTIAL_REVISION]
             == api_sms.CREDENTIAL_REVISION)
+
+
+def test_a_failed_probe_restores_the_original_vin_encoding():
+    """The alternative encoding is a probe, not a discovery.
+
+    Sending the VIN in the clear can never be decrypted, so letting a single
+    rejected request flip the process-wide default would make every later poll
+    strictly worse than before.  The probe must put the old value back.
+    """
+    client, session = _client([
+        {"code": "079001", "msg": "[SDK]此接口未被授权，无法访问!"},   # encrypted
+        {"code": "079025", "msg": "Decrypt X-VIN failed."},           # plain probe
+    ])
+
+    result = asyncio.run(client._gw3(
+        "GET", "/ms-vehicle-status/api/v1.0/vehicle/status/latest",
+        vin=VIN, token="gw3-token",
+    ))
+
+    assert result["code"] == "079025"
+    assert len(session.calls) == 2
+    assert session.calls[0]["headers"]["X-VIN"] == f"ENC({VIN})"
+    assert session.calls[1]["headers"]["X-VIN"] == VIN
+    # Back to the encoding we started with …
+    assert client.gateway_summary()["gw3_vin_encrypted"] is True
+
+    # … and both hops are on record, so one dump shows what was tried.
+    attempts = client.gateway_summary()["gw3_vin_attempts"]
+    assert [item["x_vin_encrypted"] for item in attempts] == [True, False]
+    assert [item["code"] for item in attempts] == ["079001", "079025"]
+
+
+def test_diagnostics_report_the_login_device_profile():
+    client, _ = _client()
+
+    summary = client.gateway_summary()
+    assert summary["login_device_id"] == api_sms.DEFAULT_LOGIN_DEVICE_ID
+    assert len(summary["login_device_id"].split("-")) >= 4
