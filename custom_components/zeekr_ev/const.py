@@ -31,6 +31,26 @@ CONF_ENABLE_COMMANDS = "enable_commands"
 # 令牌").  Empty = fall back to encrypting the VIN locally.
 CONF_VEHICLE_TOKEN = "vehicle_token"
 
+# ``loginDeviceId`` is not a free-form id: the app sends a composite
+# ``{brand}-{model}-{sdkInt}-{osRelease}`` string, and the mobile SDK parses it
+# to describe the device a session belongs to.  A bare uuid is not that shape,
+# so the gateway has no device profile to attach the session to — which is the
+# most plausible reason endpoints that need a car's capabilities answer
+# ``079001 此接口未被授权`` while plain reads still work.  The reference
+# implementation hard-codes an equally synthetic string
+# (``google-sdk_gphone64_x86_64-36-16``) and works, so the *shape* is what
+# matters, not the device's authenticity.  This one is verbatim from the
+# captured app traffic.
+DEFAULT_LOGIN_DEVICE_ID = "Android-Android SDK built for arm64-26-8.0.0"
+
+# Bumped whenever the shape of the login request changes in a way that should
+# invalidate tokens minted by an older build.  ``store_tokens`` drops the stored
+# GW3 token when the entry was written by a different revision, which forces one
+# fresh ``snc_login`` instead of silently reusing a session the gateway built
+# from the old request — without it, a fix like the device id above would never
+# take effect until the token happened to expire.
+CREDENTIAL_REVISION = 2
+
 DRIVE_SIDE_LHD = "lhd"
 DRIVE_SIDE_RHD = "rhd"
 
@@ -60,6 +80,9 @@ STORAGE_USER_ID = "user_id"
 STORAGE_CLIENT_ID = "client_id"
 STORAGE_NEW_ACCESS_TOKEN = "new_access_token"
 STORAGE_NEW_REFRESH_TOKEN = "new_refresh_token"
+
+# Which build's login shape minted the stored tokens (see CREDENTIAL_REVISION).
+STORAGE_CREDENTIAL_REVISION = "credential_revision"
 
 
 def _load_manifest_version() -> str:

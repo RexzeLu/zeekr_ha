@@ -718,3 +718,65 @@ def test_status_query_matches_the_captured_app_request():
 
     url = session.calls[0]["url"]
     assert url.endswith("/vehicle/status/latest?latest=&target=new")
+
+
+# ---------------------------------------------------------------------------
+# The login device profile
+# ---------------------------------------------------------------------------
+
+
+def test_login_device_id_has_the_shape_the_sdk_parses():
+    """``loginDeviceId`` is ``brand-model-sdk-release``, never a bare uuid.
+
+    The app sends ``Android-Android SDK built for arm64-26-8.0.0`` and the
+    reference implementation hard-codes an equally synthetic
+    ``google-sdk_gphone64_x86_64-36-16`` — so the *shape* is what the SDK reads
+    to describe the device a session belongs to, not the device's authenticity.
+    A uuid has none of those parts.
+    """
+    client, _ = _client()
+
+    device = client._login_device_id
+    assert device == api_sms.DEFAULT_LOGIN_DEVICE_ID
+    assert len(device.split("-")) >= 4          # brand / model / sdk / release
+    assert device != client._device_id          # not the X-DEVICE-ID uuid
+
+
+def test_tokens_from_an_older_login_shape_are_dropped():
+    """A corrected login must not be shadowed by a token minted before it.
+
+    Otherwise the fix only takes effect whenever the old token happens to
+    expire.  Only the GW3 token is dropped — the GW1/GW2 credentials stay, so
+    this costs one silent ``snc_login`` and never a reauth.
+    """
+    client, _ = _client()
+
+    client.store_tokens({
+        "new_access_token": "stale-gw3-token",
+        "new_refresh_token": "stale-refresh",
+        "jwt_token": "jwt-token-value",
+        "access_token": "gw2-token",
+        api_sms.STORAGE_CREDENTIAL_REVISION: api_sms.CREDENTIAL_REVISION - 1,
+    })
+
+    assert client.has_gw3_token is False
+    assert client._jwt_token == "jwt-token-value"
+    assert client._access_token == "gw2-token"
+
+
+def test_tokens_from_the_current_revision_are_kept():
+    client, _ = _client()
+
+    client.store_tokens({
+        "new_access_token": "gw3-token",
+        api_sms.STORAGE_CREDENTIAL_REVISION: api_sms.CREDENTIAL_REVISION,
+    })
+
+    assert client.has_gw3_token is True
+
+
+def test_token_storage_stamps_the_current_revision():
+    client, _ = _client()
+
+    assert (client.get_token_storage()[api_sms.STORAGE_CREDENTIAL_REVISION]
+            == api_sms.CREDENTIAL_REVISION)

@@ -38,8 +38,11 @@ from Crypto.Util.Padding import pad
 
 from .const import (
     CONF_PHONE,
+    CREDENTIAL_REVISION,
+    DEFAULT_LOGIN_DEVICE_ID,
     STORAGE_ACCESS_TOKEN,
     STORAGE_CLIENT_ID,
+    STORAGE_CREDENTIAL_REVISION,
     STORAGE_DEVICE_ID,
     STORAGE_JWT_TOKEN,
     STORAGE_NEW_ACCESS_TOKEN,
@@ -304,6 +307,9 @@ class ZeekrSmsApiClient:
     def __init__(self, session) -> None:
         self._session = session
         self._device_id = uuid.uuid4().hex
+        # Sent as ``loginDeviceId``; see DEFAULT_LOGIN_DEVICE_ID for why this is
+        # a composite string rather than the uuid above.
+        self._login_device_id = DEFAULT_LOGIN_DEVICE_ID
         self._phone: str | None = None
         self._jwt_token: str | None = None
         self._access_token: str | None = None
@@ -359,6 +365,14 @@ class ZeekrSmsApiClient:
 
     def store_tokens(self, data: dict[str, Any]) -> None:
         """Load persisted tokens / identifiers from a config entry."""
+        # A token minted by an older login shape describes a session the gateway
+        # built from a request this build has since corrected, so reusing it
+        # would keep the fix from taking effect.  Only the GW3 token is dropped
+        # — the GW1/GW2 credentials stay, so this costs one silent
+        # ``snc_login`` and never a reauth.
+        stale_session = (
+            data.get(STORAGE_CREDENTIAL_REVISION) != CREDENTIAL_REVISION
+        )
         self._device_id = data.get(STORAGE_DEVICE_ID) or self._device_id
         self._phone = data.get(CONF_PHONE) or self._phone
         self._jwt_token = data.get(STORAGE_JWT_TOKEN) or self._jwt_token
@@ -366,12 +380,13 @@ class ZeekrSmsApiClient:
         self._refresh_token = data.get(STORAGE_REFRESH_TOKEN) or self._refresh_token
         self._user_id = data.get(STORAGE_USER_ID) or self._user_id
         self._client_id = data.get(STORAGE_CLIENT_ID) or self._client_id
-        self._new_access_token = (
-            data.get(STORAGE_NEW_ACCESS_TOKEN) or self._new_access_token
-        )
-        self._new_refresh_token = (
-            data.get(STORAGE_NEW_REFRESH_TOKEN) or self._new_refresh_token
-        )
+        if not stale_session:
+            self._new_access_token = (
+                data.get(STORAGE_NEW_ACCESS_TOKEN) or self._new_access_token
+            )
+            self._new_refresh_token = (
+                data.get(STORAGE_NEW_REFRESH_TOKEN) or self._new_refresh_token
+            )
 
     def get_token_storage(self) -> dict[str, Any]:
         return {
@@ -384,6 +399,7 @@ class ZeekrSmsApiClient:
             STORAGE_CLIENT_ID: self._client_id,
             STORAGE_NEW_ACCESS_TOKEN: self._new_access_token,
             STORAGE_NEW_REFRESH_TOKEN: self._new_refresh_token,
+            STORAGE_CREDENTIAL_REVISION: CREDENTIAL_REVISION,
         }
 
     # -- properties -------------------------------------------------------
@@ -957,7 +973,7 @@ class ZeekrSmsApiClient:
                     "credential": "",
                     "identifier": "",
                     "identityType": 5,
-                    "loginDeviceId": self._device_id,
+                    "loginDeviceId": self._login_device_id,
                     "loginDeviceJgId": "",
                     "loginDeviceType": 1,
                     "loginPhoneBrand": "Android",
@@ -998,7 +1014,7 @@ class ZeekrSmsApiClient:
             result = await self._gw3(
                 "POST", "/ms-user-auth/v1.0/auth/refreshToken",
                 payload={
-                    "loginDeviceId": self._device_id,
+                    "loginDeviceId": self._login_device_id,
                     "loginDeviceType": 1,
                     "loginPhoneBrand": "Android",
                     "loginPhoneModel": "Android SDK built for arm64",
