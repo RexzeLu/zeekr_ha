@@ -19,6 +19,7 @@ from .const import (
     CONF_REGION_CODE,
     CONF_SEAT_DURATION,
     CONF_STEERING_WHEEL_DURATION,
+    CONF_VEHICLE_TOKEN,
     DEFAULT_AC_DURATION,
     DEFAULT_ENABLE_COMMANDS,
     DEFAULT_POLLING_INTERVAL,
@@ -242,6 +243,14 @@ class ZeekrEVOptionsFlow(config_entries.OptionsFlow):
                 ): vol.All(
                     vol.Coerce(int), vol.Range(min=MIN_DURATION, max=MAX_DURATION)
                 ),
+                # Optional.  The SNCTSP platform addresses a car with this
+                # opaque token instead of the VIN, and the token is what carries
+                # the car's permissions, so it cannot be computed here.  Leave
+                # it empty to keep using an encrypted VIN (see README).
+                vol.Optional(
+                    CONF_VEHICLE_TOKEN,
+                    default=current.get(CONF_VEHICLE_TOKEN, ""),
+                ): str,
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)

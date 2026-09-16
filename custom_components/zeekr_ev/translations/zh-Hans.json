@@ -43,7 +43,8 @@
           "enable_commands": "允许下发控制指令",
           "seat_duration": "座椅加热/通风时长（分钟）",
           "ac_duration": "空调运行时长（分钟）",
-          "steering_wheel_duration": "方向盘加热时长（分钟）"
+          "steering_wheel_duration": "方向盘加热时长（分钟）",
+          "vehicle_token": "车辆 X-VIN 令牌（可选，取自 App 抓包）"
         }
       }
     }

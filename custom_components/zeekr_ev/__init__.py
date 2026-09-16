@@ -23,6 +23,7 @@ from .const import (
     ATTR_VIN,
     CONF_PHONE,
     CONF_REGION_CODE,
+    CONF_VEHICLE_TOKEN,
     DOMAIN,
     PLATFORMS,
     SERVICE_DUMP_RAW,
@@ -116,6 +117,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     session = async_get_clientsession(hass)
     client = ZeekrSmsApiClient(session)
     client.store_tokens(entry.data)
+    # The platform's own per-vehicle X-VIN token, when the owner supplied one.
+    client.set_vehicle_token(
+        entry.options.get(CONF_VEHICLE_TOKEN)
+        or entry.data.get(CONF_VEHICLE_TOKEN)
+    )
 
     coordinator = ZeekrCoordinator(hass, client, entry)
     await coordinator.async_init_stats()

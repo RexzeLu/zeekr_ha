@@ -99,6 +99,23 @@ _DISPLACED_MARKERS = ("logged in elsewhere", "已在其他设备登录", "别处
 _FORBIDDEN_CODES = {"079001"}
 _FORBIDDEN_MARKERS = ("未被授权", "not authorized")
 
+# "Decrypt X-VIN failed" — the gateway could not open the ``X-VIN`` header it
+# was given.  The app AES-encrypts the VIN (see :meth:`ZeekrSmsApiClient.
+# _encrypt_vin`), so this code always means the header was sent in the wrong
+# encoding — a plain VIN is exactly the thing that cannot be decrypted.
+_VIN_DECRYPT_CODES = {"079025"}
+_VIN_DECRYPT_MARKERS = ("decrypt x-vin",)
+
+
+def _is_vin_decrypt_failure(result: Any) -> bool:
+    """True when the gateway could not decrypt our ``X-VIN`` header."""
+    if not isinstance(result, dict):
+        return False
+    if str(result.get("code") or "") in _VIN_DECRYPT_CODES:
+        return True
+    blob = _result_text(result).lower()
+    return any(marker in blob for marker in _VIN_DECRYPT_MARKERS)
+
 
 class ZeekrError(Exception):
     """Base class for Zeekr API errors."""
@@ -314,14 +331,31 @@ class ZeekrSmsApiClient:
         # Outcome of the gateways tried by the last remote-control command.
         self._command_attempts: list[dict[str, Any]] = []
         # How X-VIN is encoded, and whether the alternative was already tried.
-        self._gw3_vin_encrypted = False
+        #
+        # Encrypted is the default because it is what the app does and what the
+        # gateway demonstrably expects: sending the VIN in the clear answers
+        # ``079025 Decrypt X-VIN failed``.  The plain form is still reachable as
+        # a single fallback, because one independent integration sends it that
+        # way — but it can only ever be the *second* thing we try.
+        self._gw3_vin_encrypted = True
         self._gw3_vin_flipped = False
+        # Every X-VIN encoding tried, with the gateway's verdict — this is what
+        # settles the question when a dump comes back.
+        self._gw3_vin_attempts: list[dict[str, Any]] = []
+        # Opaque per-vehicle ``X-VIN`` token supplied by the owner (None = derive
+        # it locally by encrypting the VIN).
+        self._vehicle_token: str | None = None
 
     # -- token persistence ------------------------------------------------
 
     def set_device_id(self, device_id: str | None) -> None:
         if device_id:
             self._device_id = device_id
+
+    def set_vehicle_token(self, token: str | None) -> None:
+        """Use the app's own ``X-VIN`` value instead of a locally derived one."""
+        token = (token or "").strip()
+        self._vehicle_token = token or None
 
     def store_tokens(self, data: dict[str, Any]) -> None:
         """Load persisted tokens / identifiers from a config entry."""
@@ -396,6 +430,9 @@ class ZeekrSmsApiClient:
             "gw3_last_rejected": self._gw3_last_rejected,
             "command_attempts": list(self._command_attempts),
             "gw3_vin_encrypted": self._gw3_vin_encrypted,
+            # Only whether it is set — the token itself is a capability secret.
+            "vehicle_token_configured": bool(self._vehicle_token),
+            "gw3_vin_attempts": list(self._gw3_vin_attempts),
         }
 
     # -- signing / gateway plumbing --------------------------------------
@@ -778,6 +815,11 @@ class ZeekrSmsApiClient:
                 "status": status,
                 "response": _response_brief(result),
             }
+        if vin:
+            self._record_vin_attempt(
+                shape.get("method"), shape.get("path"),
+                extra.get("X-VIN") != vin, status, result,
+            )
         if _looks_like_auth_error(result, status):
             if retry and await self._recover_gw3_session(result):
                 return await self._gw3(method, path, params, payload,
@@ -786,20 +828,39 @@ class ZeekrSmsApiClient:
             raise ZeekrAuthError(
                 f"GW3 鉴权失败: {result.get('msg') if isinstance(result, dict) else status}"
             )
-        # "Interface not authorized" on an endpoint that carries X-VIN, while
-        # the endpoint without it works: the VIN encoding is the one variable we
-        # control, so spend a single retry on the alternative form.
+        # Two failures point at the X-VIN encoding rather than at permissions:
+        # "decrypt failed" (we sent something it cannot open) and "interface not
+        # authorized" (it may have opened it into the wrong VIN).  Spend exactly
+        # one retry on the other form, and only for calls that did not pin it.
         if (retry and vin_encrypted is None and not self._gw3_vin_flipped
-                and _is_forbidden_interface(result)):
+                and not self._vehicle_token
+                and (_is_vin_decrypt_failure(result)
+                     or _is_forbidden_interface(result))):
             self._gw3_vin_encrypted = not self._gw3_vin_encrypted
             self._gw3_vin_flipped = True
             _LOGGER.warning(
-                "GW3 接口未授权，改用%s X-VIN 重试一次",
+                "GW3 拒绝了 X-VIN（%s），改用%s重试一次",
+                _response_brief(result).get("msg"),
                 "AES 加密" if self._gw3_vin_encrypted else "明文",
             )
             return await self._gw3(method, path, params, payload,
                                    token=token, vin=vin, retry=False)
         return result if isinstance(result, dict) else {"code": str(status)}
+
+    def _record_vin_attempt(self, method: Any, path: Any, encrypted: bool,
+                            status: int, result: Any) -> None:
+        """Remember how each X-VIN encoding fared (diagnostics only)."""
+        brief = _response_brief(result)
+        self._gw3_vin_attempts.append({
+            "method": method,
+            "path": path,
+            "x_vin_encrypted": encrypted,
+            "status": status,
+            "code": brief.get("code"),
+            "msg": brief.get("msg"),
+        })
+        # Only the tail is interesting; one poll's worth is plenty.
+        del self._gw3_vin_attempts[:-8]
 
     async def _recover_gw3_session(self, result: Any) -> bool:
         """Renew the GW3 session after an auth failure.
@@ -847,13 +908,16 @@ class ZeekrSmsApiClient:
     def _gw3_vin_value(self, vin: str, encrypted: bool | None = None) -> str:
         """``X-VIN`` in the requested encoding, defaulting to the detected one.
 
-        The app AES-encrypts the VIN, but an independent Zeekr integration
-        talking to this same SNCTSP gateway sends it verbatim — and every
-        endpoint of ours that *does* carry ``X-VIN`` answers
-        ``079001 接口未被授权`` while the one that does not (the vehicle list)
-        works.  So the data/control calls probe both forms (see :meth:`_gw3`)
-        while the auth calls keep the encoding that is known to log in.
+        A token supplied by the owner always wins.  On the new platform the
+        header is not merely an encrypted VIN: it is an opaque per-vehicle token
+        that both addresses **and authorises** the car, so nothing we can derive
+        locally reproduces it — an encrypted VIN is accepted (login proves that)
+        yet answers ``079001 此接口未被授权`` on every endpoint that needs the
+        car's capabilities.  Without a token we still send the encrypted VIN, as
+        the app's own implementation does.
         """
+        if self._vehicle_token:
+            return self._vehicle_token
         if self._gw3_vin_encrypted if encrypted is None else encrypted:
             return self._encrypt_vin(vin)
         return vin
@@ -1012,7 +1076,10 @@ class ZeekrSmsApiClient:
     async def get_vehicle_status_gw3(self, vin: str) -> dict[str, Any]:
         result = await self._gw3(
             "GET", "/ms-vehicle-status/api/v1.0/vehicle/status/latest",
-            params={"latest": "false", "target": "new"},
+            # Exactly as the app sends it: ``latest`` is present but empty,
+            # not "false".  The captured request is
+            # ``...status/latest?latest=&target=new``.
+            params={"latest": "", "target": "new"},
             vin=vin, token=self._new_access_token,
         )
         data = _ok_payload(result)

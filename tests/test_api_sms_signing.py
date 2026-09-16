@@ -503,8 +503,9 @@ def test_remote_control_uses_the_snctsp_control_endpoint():
 
 def test_remote_control_falls_back_to_the_gw2_telematics_pipe():
     client, session = _command_client([
-        {"code": "079025", "msg": "Signature authentication failed."},
-        {"code": "1000", "msg": "操作成功"},
+        {"code": "079025", "msg": "Decrypt X-VIN failed."},   # gw3, encrypted
+        {"code": "079025", "msg": "Decrypt X-VIN failed."},   # gw3, plain retry
+        {"code": "1000", "msg": "操作成功"},                   # gw2
     ])
 
     result = asyncio.run(
@@ -512,9 +513,9 @@ def test_remote_control_falls_back_to_the_gw2_telematics_pipe():
     )
 
     assert result["gateway"] == "gw2"
-    assert len(session.calls) == 2
-    assert session.calls[1]["method"] == "PUT"
-    assert session.calls[1]["url"] == (
+    assert len(session.calls) == 3
+    assert session.calls[2]["method"] == "PUT"
+    assert session.calls[2]["url"] == (
         f"https://api.zeekrline.com/remote-control/vehicle/telematics/{VIN}"
     )
 
@@ -582,6 +583,28 @@ def test_displaced_session_logs_in_again_and_retries_the_command():
     assert client._new_access_token == "Bearer fresh-token"
 
 
+def test_x_vin_is_encrypted_by_default():
+    """The gateway decrypts ``X-VIN``, so the plain form can never be first.
+
+    Sending the VIN verbatim answers ``079025 Decrypt X-VIN failed`` — there is
+    nothing to decrypt.  Encrypted is therefore the default, and the plain form
+    exists only as the single fallback below.
+    """
+    client, session = _client({"code": "000000", "data": {}})
+
+    asyncio.run(client._gw3(
+        "GET", "/ms-vehicle-status/api/v1.0/vehicle/status/latest",
+        params={"latest": "false", "target": "new"},
+        vin=VIN, token="gw3-token",
+    ))
+
+    assert len(session.calls) == 1
+    sent = session.calls[0]["headers"]["X-VIN"]
+    assert sent != VIN                  # encrypted, not the VIN verbatim
+    assert sent == f"ENC({VIN})"        # … by the app's AES routine
+    assert json.dumps(client.gateway_summary()).count(VIN) == 0
+
+
 def test_forbidden_interface_flips_the_vin_encoding_once():
     """``079001`` on an X-VIN endpoint: retry with the other VIN form.
 
@@ -604,6 +627,94 @@ def test_forbidden_interface_flips_the_vin_encoding_once():
     assert len(session.calls) == 2
     first = session.calls[0]["headers"]["X-VIN"]
     second = session.calls[1]["headers"]["X-VIN"]
-    assert first == VIN            # plain first …
-    assert second != VIN           # … encrypted on the retry
-    assert client.gateway_summary()["gw3_vin_encrypted"] is True
+    assert first != VIN            # encrypted first (what the app sends) …
+    assert second == VIN           # … plain only on the retry
+    assert client.gateway_summary()["gw3_vin_encrypted"] is False
+
+    # Both hops are recorded, so one dump answers which form the gateway wants.
+    attempts = client.gateway_summary()["gw3_vin_attempts"]
+    assert [item["x_vin_encrypted"] for item in attempts] == [True, False]
+    assert [item["code"] for item in attempts] == ["079001", "000000"]
+
+
+def test_decrypt_failure_also_flips_the_vin_encoding():
+    """``079025 Decrypt X-VIN failed`` is the same hint from the other side."""
+    client, session = _client([
+        {"code": "079025", "msg": "Decrypt X-VIN failed."},
+        {"code": "000000", "data": {"additionalVehicleStatus": {}}},
+    ])
+
+    result = asyncio.run(client._gw3(
+        "GET", "/ms-vehicle-status/api/v1.0/vehicle/status/latest",
+        vin=VIN, token="gw3-token",
+    ))
+
+    assert result["code"] == "000000"
+    assert len(session.calls) == 2
+    assert session.calls[1]["headers"]["X-VIN"] == VIN
+
+
+# ---------------------------------------------------------------------------
+# The owner-supplied X-VIN token
+# ---------------------------------------------------------------------------
+
+
+def test_supplied_vehicle_token_is_sent_verbatim_as_x_vin():
+    """The app's own token replaces anything we could derive.
+
+    On the SNCTSP platform ``X-VIN`` carries the car's *capability*, not just
+    its identity — an encrypted VIN is accepted by the login endpoint and then
+    answers ``079001 此接口未被授权`` everywhere else.  So when the owner pastes
+    the value from the app, it must go out untouched.
+    """
+    client, session = _client({"code": "000000", "data": {}})
+    client.set_vehicle_token("opaque-per-vehicle-token")
+
+    asyncio.run(client._gw3(
+        "GET", "/ms-vehicle-status/api/v1.0/vehicle/status/latest",
+        vin=VIN, token="gw3-token",
+    ))
+
+    assert session.calls[0]["headers"]["X-VIN"] == "opaque-per-vehicle-token"
+    summary = client.gateway_summary()
+    assert summary["vehicle_token_configured"] is True
+    # …and the token itself never reaches the diagnostics.
+    assert "opaque-per-vehicle-token" not in json.dumps(summary)
+
+
+def test_supplied_token_is_never_second_guessed():
+    """With a token configured there is nothing left to probe."""
+    client, session = _client([
+        {"code": "079001", "msg": "[SDK]此接口未被授权，无法访问!"},
+    ])
+    client.set_vehicle_token("opaque-per-vehicle-token")
+
+    result = asyncio.run(client._gw3(
+        "GET", "/ms-vehicle-status/api/v1.0/vehicle/status/latest",
+        vin=VIN, token="gw3-token",
+    ))
+
+    assert result["code"] == "079001"
+    assert len(session.calls) == 1        # no flip, no second request
+    assert session.calls[0]["headers"]["X-VIN"] == "opaque-per-vehicle-token"
+
+
+def test_blank_token_falls_back_to_the_encrypted_vin():
+    client, session = _client({"code": "000000", "data": {}})
+    client.set_vehicle_token("   ")
+
+    asyncio.run(client._gw3("GET", "/ms-vehicle-status/api/v1.0/vehicle/status/latest",
+                            vin=VIN, token="gw3-token"))
+
+    assert session.calls[0]["headers"]["X-VIN"] == f"ENC({VIN})"
+    assert client.gateway_summary()["vehicle_token_configured"] is False
+
+
+def test_status_query_matches_the_captured_app_request():
+    """The app sends ``?latest=&target=new`` — an empty ``latest``, not false."""
+    client, session = _client({"code": "000000", "data": {"basicVehicleStatus": {}}})
+
+    asyncio.run(client.get_vehicle_status_gw3(VIN))
+
+    url = session.calls[0]["url"]
+    assert url.endswith("/vehicle/status/latest?latest=&target=new")

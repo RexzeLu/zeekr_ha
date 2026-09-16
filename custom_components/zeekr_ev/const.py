@@ -23,6 +23,14 @@ CONF_AC_DURATION = "ac_duration"
 CONF_STEERING_WHEEL_DURATION = "steering_wheel_duration"
 CONF_ENABLE_COMMANDS = "enable_commands"
 
+# The new Zeekr (SNCTSP) platform addresses a car with an *opaque per-vehicle
+# token* in the ``X-VIN`` header rather than with the plain VIN — and that token
+# both addresses **and authorises** the car, so it carries capabilities that
+# encrypting the VIN ourselves cannot reproduce.  It is stable per car but
+# minted inside the app, so the owner pastes it in (see README, "车辆 X-VIN
+# 令牌").  Empty = fall back to encrypting the VIN locally.
+CONF_VEHICLE_TOKEN = "vehicle_token"
+
 DRIVE_SIDE_LHD = "lhd"
 DRIVE_SIDE_RHD = "rhd"
 

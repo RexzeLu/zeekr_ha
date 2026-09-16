@@ -43,7 +43,8 @@
           "enable_commands": "Allow sending control commands",
           "seat_duration": "Seat heating / ventilation duration (minutes)",
           "ac_duration": "Air conditioning duration (minutes)",
-          "steering_wheel_duration": "Steering wheel heating duration (minutes)"
+          "steering_wheel_duration": "Steering wheel heating duration (minutes)",
+          "vehicle_token": "Vehicle X-VIN token (optional, from the app's traffic)"
         }
       }
     }

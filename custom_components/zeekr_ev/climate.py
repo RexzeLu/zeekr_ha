@@ -80,6 +80,19 @@ class ZeekrClimate(ZeekrEntity, ClimateEntity, RestoreEntity):
 
     @property
     def target_temperature(self) -> float | None:
+        """Prefer the setpoint the car reports, fall back to the last one used.
+
+        The cloud does hold it (``currentTemperature``), but answers ``"0.0"``
+        whenever the AC is off — and reading straight from local state instead
+        made the entity show its own stale default while the app showed the real
+        setpoint.
+        """
+        reported = self.get("climate", "target_temp")
+        try:
+            if reported is not None:
+                return float(reported)
+        except (TypeError, ValueError):
+            pass
         return self._attr_target_temperature
 
     @property
@@ -119,6 +132,11 @@ class ZeekrClimate(ZeekrEntity, ClimateEntity, RestoreEntity):
         if temperature is None:
             return
         self._attr_target_temperature = float(temperature)
+        # Show the new setpoint at once, and let the store take it back if the
+        # car never confirms it.
+        self.coordinator.set_optimistic(
+            self.vin, "climate", "target_temp", value=float(temperature)
+        )
         self.async_write_ha_state()
         # If the AC is already running, push the new setpoint immediately.
         if self.hvac_mode == HVACMode.HEAT_COOL:
