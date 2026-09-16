@@ -242,6 +242,17 @@ def as_int(value: Any) -> int | None:
     return int(number) if number is not None else None
 
 
+def _positive_float(value: Any) -> float | None:
+    """Like :func:`as_float` but treats 0 as "not set".
+
+    Several Zeekr fields answer ``"0.0"`` when they have no meaningful value
+    (the AC setpoint is the one that bit us: the seat-warmer style sentinel).
+    Reporting it verbatim would show a bogus 0 °C setpoint.
+    """
+    number = as_float(value)
+    return number if number else None
+
+
 _TRUE_TOKENS = {"1", "true", "on", "yes", "open", "opened", "active", "running",
                 "locked", "armed", "engine_on"}
 _FALSE_TOKENS = {"0", "2", "false", "off", "no", "close", "closed", "inactive",
@@ -378,11 +389,16 @@ _ALIAS = {
                     "temperatureInCar", "carInsideTemp"),
     "outside_temp": ("exteriorTemp", "outsideTemp", "ambientTemp",
                      "externalTemp"),
+    # ``currentTemperature`` is the AC setpoint the app pushes; unset reads as
+    # "0.0", which is meaningless rather than cold, so 0 is mapped to None below.
     "target_temp": ("currentTemperature", "temperatureSetting",
                     "targetTemperature", "acTemperature", "acTemprature"),
-    "ac_on": ("airBlowerActive", "acStatus", "acOn", "airConditionerStatus",
-              "airConStatus", "climateActive", "climateStatus.activeStatus",
-              "activeStatus", "preClimateActive"),
+    # ``preClimateActive`` is the AC indicator; ``airBlowerActive`` is the cabin
+    # blower, which on this platform only flips for the air-purification
+    # (G-Clean) run.  An earlier revision read the blower first, so the AC showed
+    # as off in Home Assistant even while it was running.
+    "ac_on": ("preClimateActive", "acStatus", "acOn", "airConditionerStatus",
+              "airConStatus", "climateActive", "climateStatus.activeStatus"),
     "blower": ("airBlowerActive", "blowerActive", "fanStatus"),
     "defrost": ("defrostStatus", "frontDefrostStatus", "climateStatus.defrost",
                 "defrost", "dfStatus"),
@@ -934,7 +950,8 @@ def normalize_vehicle_data(raw: Any, meta: dict[str, Any] | None = None) -> dict
     canonical["climate"] = {
         "inside_temp": as_float(_lookup(index, "inside_temp")),
         "outside_temp": as_float(_lookup(index, "outside_temp")),
-        "target_temp": as_float(_lookup(index, "target_temp")),
+        # 0.0 is the "no setpoint" sentinel, not a temperature.
+        "target_temp": _positive_float(_lookup(index, "target_temp")),
         "ac_on": as_bool(_lookup(index, "ac_on")),
         "blower": as_bool(_lookup(index, "blower")),
         "defrost": as_bool(_lookup(index, "defrost")),

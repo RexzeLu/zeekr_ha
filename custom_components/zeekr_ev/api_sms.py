@@ -86,6 +86,19 @@ _AUTH_CODES = {"401", "40101", "40102", "40106", "40001", "10401"}
 _AUTH_MARKERS = ("token", "expire", "未登录", "登录失效", "unauthorized",
                  "invalid session")
 
+# The account holds a single SNCTSP session: each fresh login invalidates the
+# previous token, and using a superseded one answers 079021 "logged in
+# elsewhere".  Renewing the login is the cure.
+_DISPLACED_CODES = {"079021"}
+_DISPLACED_MARKERS = ("logged in elsewhere", "已在其他设备登录", "别处登录")
+
+# "This interface is not authorized" — the token is fine, the endpoint just is
+# not permitted for it.  Re-logging in cannot help, and doing so would only
+# invalidate the session we are already using, so it must NOT be treated as a
+# session problem.
+_FORBIDDEN_CODES = {"079001"}
+_FORBIDDEN_MARKERS = ("未被授权", "not authorized")
+
 
 class ZeekrError(Exception):
     """Base class for Zeekr API errors."""
@@ -163,7 +176,45 @@ def _b64(raw: bytes) -> str:
     return base64.b64encode(raw).decode()
 
 
+def _result_text(result: Any) -> str:
+    """Lower-cased message blob of a gateway response."""
+    if not isinstance(result, dict):
+        return ""
+    return " ".join(
+        str(result.get(key, "")) for key in ("msg", "message", "error", "errorMsg")
+    ).lower()
+
+
+def _is_displaced(result: Any) -> bool:
+    """True when the gateway says another login owns the account's session."""
+    if not isinstance(result, dict):
+        return False
+    if str(result.get("code") or "") in _DISPLACED_CODES:
+        return True
+    blob = _result_text(result)
+    return any(marker in blob for marker in _DISPLACED_MARKERS)
+
+
+def _is_forbidden_interface(result: Any) -> bool:
+    """True for "interface not authorized" — a permission, not a session, issue."""
+    if not isinstance(result, dict):
+        return False
+    if str(result.get("code") or "") in _FORBIDDEN_CODES:
+        return True
+    blob = _result_text(result)
+    return any(marker in blob for marker in _FORBIDDEN_MARKERS)
+
+
 def _looks_like_auth_error(result: Any, status: int | None = None) -> bool:
+    # An endpoint the token is simply not entitled to says nothing about the
+    # session: re-authenticating would not help and would only displace the
+    # token we are using, so it must not be reported as an auth failure.
+    if _is_forbidden_interface(result):
+        return False
+    # A superseded session is recoverable by logging in again — and its message
+    # contains none of the generic markers below, so it needs its own check.
+    if _is_displaced(result):
+        return True
     if status in (401, 403):
         return True
     if not isinstance(result, dict):
@@ -689,13 +740,31 @@ class ZeekrSmsApiClient:
                 "response": _response_brief(result),
             }
         if _looks_like_auth_error(result, status):
-            if retry and await self.async_refresh():
+            if retry and await self._recover_gw3_session(result):
                 return await self._gw3(method, path, params, payload, extra,
                                        retry=False)
             raise ZeekrAuthError(
                 f"GW3 鉴权失败: {result.get('msg') if isinstance(result, dict) else status}"
             )
         return result if isinstance(result, dict) else {"code": str(status)}
+
+    async def _recover_gw3_session(self, result: Any) -> bool:
+        """Renew the GW3 session after an auth failure.
+
+        ``079021 logged in elsewhere`` means our token was superseded — the
+        account only holds one SNCTSP session and every new login drops the
+        previous token.  Only a fresh login takes it back, so a plain token
+        refresh is not enough.
+        """
+        if _is_displaced(result):
+            _LOGGER.warning(
+                "GW3 会话已被顶替（%s），重新登录以取回",
+                _result_text(result)[:120],
+            )
+            await self.snc_login()
+            return bool(self._new_access_token)
+        return await self.async_refresh()
+
 
     def _first_known_vin(self) -> str | None:
         """A VIN to identify the car with, when one is already known.

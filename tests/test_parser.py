@@ -412,3 +412,36 @@ def test_describe_payload_reports_field_provenance(fixture):
 
 def test_describe_payload_handles_non_dict():
     assert parser.describe_payload(None) == {"type": "NoneType"}
+
+
+def test_ac_on_reads_pre_climate_active_not_the_blower():
+    """``airBlowerActive`` is the cabin blower, not the AC indicator.
+
+    A real payload captured with the AC running had
+    ``preClimateActive: true`` while ``airBlowerActive`` stayed ``"false"`` —
+    reading the blower first made the AC look permanently off.
+    """
+    payload = {
+        "additionalVehicleStatus": {
+            "climateStatus": {
+                "preClimateActive": True,
+                "airBlowerActive": "false",
+            }
+        }
+    }
+    data = parser.normalize_vehicle_data(payload, {"vin": VIN_X})
+
+    assert data["climate"]["ac_on"] is True
+    assert data["climate"]["blower"] is False
+
+
+def test_ac_target_temperature_is_not_read_from_the_cloud():
+    """The cloud answers a meaningless "0.0"; the entity keeps its own value."""
+    payload = {
+        "additionalVehicleStatus": {
+            "climateStatus": {"currentTemperature": "0.0"}
+        }
+    }
+    data = parser.normalize_vehicle_data(payload, {"vin": VIN_X})
+
+    assert data["climate"]["target_temp"] is None

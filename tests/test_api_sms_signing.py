@@ -536,3 +536,47 @@ def test_remote_control_error_names_every_gateway_tried():
     assert "gw2" in message and "gw3" in message
     attempts = client.gateway_summary()["command_attempts"]
     assert [item["gateway"] for item in attempts] == ["gw3", "gw2"]
+
+
+# ---------------------------------------------------------------------------
+# Session handling: displacement vs. a forbidden interface
+# ---------------------------------------------------------------------------
+
+
+def test_forbidden_interface_is_not_mistaken_for_a_session_problem():
+    """``079001`` is a permission error: re-authenticating cannot help.
+
+    Treating it as an auth failure made every poll re-login, and each login
+    invalidates the previous token — which is how the integration ended up
+    displacing *itself* ("logged in elsewhere").
+    """
+    assert api_sms._looks_like_auth_error(
+        {"code": "079001", "msg": "[SDK]此接口未被授权，无法访问!"}, 401
+    ) is False
+    assert api_sms._looks_like_auth_error(
+        {"code": "079021", "msg": "The account is currently logged in elsewhere."},
+        401,
+    ) is True
+
+
+def test_displaced_session_logs_in_again_and_retries_the_command():
+    client, session = _command_client([
+        {"code": "079021", "msg": "The account is currently logged in elsewhere."},
+        {"code": "000000", "msg": "ok",
+         "data": {"accessToken": "Bearer fresh-token"}},   # the fresh snc_login
+        {"code": "000000", "msg": "ok"},                   # the retried command
+    ])
+
+    result = asyncio.run(
+        client.async_do_remote_control(VIN, "start", "ZAF", AC_SETTING)
+    )
+
+    assert result["gateway"] == "gw3"
+    urls = [c["url"] for c in session.calls]
+    assert len(urls) == 3
+    assert all(u.startswith("https://snc-tsp-api.zeekrlife.com/") for u in urls)
+    assert urls[0].endswith("/ms-remote-control/v1.0/remoteControl/control")
+    assert urls[1].endswith("/ms-user-auth/v1.0/auth/login")
+    assert urls[2].endswith("/ms-remote-control/v1.0/remoteControl/control")
+    # The renewed token is what the retry went out with.
+    assert client._new_access_token == "Bearer fresh-token"
