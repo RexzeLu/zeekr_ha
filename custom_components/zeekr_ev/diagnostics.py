@@ -128,6 +128,21 @@ def _describe_devices(hass: HomeAssistant) -> list[dict[str, Any]]:
     return described
 
 
+async def _probe_endpoints(coordinator: ZeekrCoordinator,
+                           data: dict[str, Any]) -> dict[str, Any]:
+    """Ask the gateway which endpoints this account may reach, and with what.
+
+    Wrapped so a diagnostics download can never fail because of a probe.
+    """
+    vin = next(iter(data), None)
+    if not vin or not coordinator.client.has_gw3_token:
+        return {}
+    try:
+        return await coordinator.client.probe_endpoints(vin)
+    except Exception as exc:  # noqa: BLE001 - diagnostics must never raise
+        return {"error": str(exc)}
+
+
 async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> dict[str, Any]:
@@ -164,6 +179,11 @@ async def async_get_config_entry_diagnostics(
         # Remote control is GW3-only; when it is missing, nothing works and
         # this block says why (login code/msg straight from the gateway).
         "gateways": coordinator.client.gateway_summary(),
+        # Ask the gateway itself where the permission boundary is: the vehicle
+        # list works while every X-VIN endpoint answers 079001, and only the
+        # gateway can say whether that is "this account may not touch this car"
+        # or "this one path is wrong".
+        "endpoint_probe": await _probe_endpoints(coordinator, data),
         "commands_enabled": coordinator.commands_enabled,
         "last_poll": coordinator.latest_poll_time,
         # Values issued by a command but not yet confirmed by the car.  Handy

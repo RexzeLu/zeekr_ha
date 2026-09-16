@@ -915,6 +915,127 @@ class ZeekrSmsApiClient:
             return probe
         return result if isinstance(result, dict) else {"code": str(status)}
 
+    def _vehicle_raw(self, vin: str) -> dict[str, Any]:
+        for vehicle in self._vehicles:
+            if vehicle.vin == vin:
+                return vehicle.raw or {}
+        return {}
+
+    def x_vin_candidates(self, vin: str) -> list[tuple[str, str]]:
+        """Values worth trying in the ``X-VIN`` header for this car.
+
+        The app AES-encrypts the VIN, which is what we send — but this account
+        does **not** own the car (``isOwner: false``), and for a shared vehicle
+        the relation that grants access is ``userVehId``, not the VIN itself.
+        Rather than guess which input the gateway wants, list the plausible ones
+        and let :meth:`probe_endpoints` show which is accepted.
+        """
+        candidates: list[tuple[str, str]] = [("aes(vin)", self._encrypt_vin(vin))]
+        raw = self._vehicle_raw(vin)
+        user_veh_id = raw.get("userVehId")
+        if user_veh_id:
+            candidates.append(
+                ("aes(userVehId)", self._encrypt_vin(str(user_veh_id)))
+            )
+            candidates.append(("userVehId", str(user_veh_id)))
+        tem_id = raw.get("temId")
+        if tem_id:
+            candidates.append(("aes(temId)", self._encrypt_vin(str(tem_id))))
+        # Known to fail (nothing to decrypt), kept as a control in the report.
+        candidates.append(("vin", vin))
+        return candidates
+
+    async def _probe_x_vin(self, label: str, value: str) -> dict[str, Any]:
+        """Try one candidate ``X-VIN`` value without touching shared state.
+
+        Built by hand rather than through :meth:`_gw3` so a probe can never
+        record, flip or otherwise disturb the request path real traffic uses.
+        """
+        path = "/ms-vehicle-status/api/v1.0/vehicle/status/latest"
+        params = {"latest": "", "target": "new"}
+        extra = {"X-VIN": value}
+        if self._new_access_token:
+            extra["Authorization"] = self._bearer(self._new_access_token)
+        url = self._with_query(f"{_GW3_BASE}{path}", params)
+        headers = self._gw3_headers("GET", path, params, None, extra)
+        try:
+            result, status = await self._request("GET", url, headers, None)
+        except Exception as exc:  # noqa: BLE001 - a probe must never raise
+            return {"label": label, "error": str(exc)}
+        brief = _response_brief(result)
+        return {
+            "label": label,
+            # The shape, never the value: it is a capability if it works.
+            "chars": len(value),
+            "status": status,
+            "code": brief.get("code"),
+            "msg": brief.get("msg"),
+        }
+
+    async def probe_endpoints(self, vin: str) -> dict[str, Any]:
+        """Map what this account is allowed to reach, and with what.
+
+        Two questions, both answerable only by the gateway:
+
+        * **Where is the boundary?** The vehicle list works while every X-VIN
+          endpoint answers ``079001 此接口未被授权`` — is that "this account may
+          not touch this car", or one wrong path?
+        * **What should ``X-VIN`` contain?** The owner's app encrypts the VIN;
+          a shared account may need something else.
+
+        A candidate that is accepted is adopted immediately, so a diagnostics
+        download can by itself repair the header.  Runs on demand only.
+        """
+        paths: list[dict[str, Any]] = []
+        saved_rejected = self._gw3_last_rejected
+        saved_attempts = list(self._gw3_vin_attempts)
+        try:
+            for name, method, path, params, with_vin in (
+                ("vehicle-list (no X-VIN)", "GET",
+                 "/ms-app-bff/api/v3.0/veh/vehicle-list",
+                 {"needSharedCar": "true"}, False),
+                ("remoteControl/getVehicleState", "GET",
+                 "/ms-app-bff/api/v1.0/remoteControl/getVehicleState", None, True),
+                ("vehicle-status/latest", "GET",
+                 "/ms-vehicle-status/api/v1.0/vehicle/status/latest",
+                 {"latest": "", "target": "new"}, True),
+            ):
+                try:
+                    result = await self._gw3(
+                        method, path, params=params, token=self._new_access_token,
+                        vin=vin if with_vin else None, retry=False,
+                        vin_encrypted=True,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    paths.append({"name": name, "path": path, "error": str(exc)})
+                    continue
+                brief = _response_brief(result)
+                paths.append({
+                    "name": name,
+                    "path": path,
+                    "with_x_vin": with_vin,
+                    "code": brief.get("code"),
+                    "msg": brief.get("msg"),
+                })
+        finally:
+            self._gw3_last_rejected = saved_rejected
+            self._gw3_vin_attempts = saved_attempts
+
+        candidates: list[dict[str, Any]] = []
+        for label, value in self.x_vin_candidates(vin):
+            outcome = await self._probe_x_vin(label, value)
+            candidates.append(outcome)
+            if outcome.get("code") == _SUCCESS:
+                if not self._vehicle_token:
+                    self.set_vehicle_token(value)
+                    self._vehicle_token_source = f"probe:{label}"
+                    _LOGGER.warning(
+                        "X-VIN 候选 %s 被网关接受，已改用该值（来源 probe）", label
+                    )
+                # No point trying the rest: this one works.
+                break
+        return {"paths": paths, "x_vin_candidates": candidates}
+
     def _record_vin_attempt(self, method: Any, path: Any, encrypted: bool,
                             status: int, result: Any) -> None:
         """Remember how each X-VIN encoding fared (diagnostics only)."""

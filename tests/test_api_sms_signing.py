@@ -879,3 +879,82 @@ def test_a_configured_token_is_not_overwritten_by_the_backend():
     summary = client.gateway_summary()
     assert summary["vehicle_token_source"] == "configured"
     assert "backend-token" not in json.dumps(summary)
+
+
+# ---------------------------------------------------------------------------
+# The permission-boundary probe
+# ---------------------------------------------------------------------------
+
+
+def test_endpoint_probe_maps_the_boundary_and_leaves_no_trace():
+    """The probe answers "where is the boundary", not "what failed".
+
+    It reuses the real request path for the endpoints it checks, so without
+    restoring the request-shape records it would overwrite the very failure a
+    diagnostics dump exists to show.
+    """
+    client, session = _client([
+        {"code": "079001", "msg": "seed"},                      # seeded traffic
+        {"code": "000000", "data": {"list": []}},               # path: vehicle list
+        {"code": "079001", "msg": "[SDK]此接口未被授权，无法访问!"},  # path: state
+        {"code": "079001", "msg": "[SDK]此接口未被授权，无法访问!"},  # path: status
+        {"code": "079001", "msg": "[SDK]此接口未被授权，无法访问!"},  # cand: aes(vin)
+        {"code": "079001", "msg": "[SDK]此接口未被授权，无法访问!"},  # cand: vin
+    ])
+    asyncio.run(client._gw3(
+        "GET", "/ms-vehicle-status/api/v1.0/vehicle/status/latest",
+        vin=VIN, token="gw3-token", retry=False,
+    ))
+    before = client.gateway_summary()
+
+    probe = asyncio.run(client.probe_endpoints(VIN))
+
+    paths = probe["paths"]
+    assert [p["name"] for p in paths] == [
+        "vehicle-list (no X-VIN)",
+        "remoteControl/getVehicleState",
+        "vehicle-status/latest",
+    ]
+    assert paths[0]["code"] == "000000"
+    assert paths[0]["with_x_vin"] is False       # the one path that works …
+    assert paths[1]["with_x_vin"] is True        # … versus an X-VIN one
+    assert paths[1]["code"] == "079001"
+    assert [c["label"] for c in probe["x_vin_candidates"]] == ["aes(vin)", "vin"]
+
+    after = client.gateway_summary()
+    assert after["gw3_last_rejected"] == before["gw3_last_rejected"]
+    assert after["gw3_vin_attempts"] == before["gw3_vin_attempts"]
+    assert after["gw3_vin_encrypted"] is True    # pinned, never flipped
+
+
+def test_an_accepted_x_vin_candidate_is_adopted():
+    """A diagnostics download can by itself repair the X-VIN header."""
+    client, _ = _client([
+        {"code": "079001", "msg": "未授权"},   # path: vehicle list
+        {"code": "079001", "msg": "未授权"},   # path: getVehicleState
+        {"code": "079001", "msg": "未授权"},   # path: status
+        {"code": "000000", "data": {}},        # candidate aes(vin) — accepted
+    ])
+
+    probe = asyncio.run(client.probe_endpoints(VIN))
+
+    assert probe["x_vin_candidates"][0]["code"] == "000000"
+    assert len(probe["x_vin_candidates"]) == 1     # stops at the first success
+    summary = client.gateway_summary()
+    assert summary["vehicle_token_configured"] is True
+    assert summary["vehicle_token_source"] == "probe:aes(vin)"
+    assert f"ENC({VIN})" not in json.dumps(summary)
+
+
+def test_x_vin_candidates_include_the_shared_car_relation():
+    """A shared car is addressed by ``userVehId``, so derive from that too."""
+    client, _ = _client()
+    client._vehicles = [api_sms.ZeekrVehicle(
+        VIN, {"vin": VIN}, {"userVehId": 100097022, "temId": "V8986"},
+    )]
+
+    labels = [label for label, _ in client.x_vin_candidates(VIN)]
+
+    assert labels == [
+        "aes(vin)", "aes(userVehId)", "userVehId", "aes(temId)", "vin",
+    ]
