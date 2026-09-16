@@ -68,6 +68,14 @@ _GW1_BASE = "https://api-gw-toc.zeekrlife.com"
 _GW2_BASE = "https://api.zeekrline.com"
 _GW3_BASE = "https://snc-tsp-api.zeekrlife.com"
 
+# The SNCTSP (GW3) gateway identifies the app twice in every request.  The
+# signing key is looked up by ``X-APP-ID``; a value it does not know comes back
+# as ``079025 Signature authentication failed``.  Both values below are taken
+# from a captured request of the official app and apply to *all* GW3 endpoints,
+# ``/ms-user-auth/v1.0/auth/login`` included.
+_GW3_APP_ID = "ZEEKRCNCH001M0001"
+_GW3_APPID_HEADER = "ONEX97FB91F061405"
+
 _SUCCESS = "000000"
 
 # Gateway auth error codes / markers that should trigger a reauth.
@@ -432,24 +440,29 @@ class ZeekrSmsApiClient:
                      payload: Any, extra: dict[str, str] | None = None
                      ) -> dict[str, str]:
         ts = _ts()
-        nonce = uuid.uuid4().hex.upper()
+        # The Zeekr app sends a plain dashed UUID here; the gateway is known to
+        # accept the app's request verbatim, so match it.
+        nonce = str(uuid.uuid4())
         headers = {
-            "X-APP-ID": "ZEEKRCNCH001M0000",
+            # Every GW3 call — auth/login included — uses the *same* app id.
+            # The gateway looks the signing key up by X-APP-ID, so a wrong one
+            # is reported as "Signature authentication failed" rather than as an
+            # unknown app.  Values below mirror a captured, working app request.
+            "X-APP-ID": _GW3_APP_ID,
+            "AppId": _GW3_APPID_HEADER,
             "X-TIMESTAMP": ts,
             "X-API-SIGNATURE-VERSION": "2.0",
             "X-SIGNATURE": "",
-            "Accept-Language": "zh-CN",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Content-Type": "application/json;charset=UTF-8",
+            "Accept-Language": "en-US",
+            "Accept-Encoding": "gzip",
+            "Content-Type": "application/json; charset=UTF-8",
             "X-PROJECT-ID": "ZEEKR",
-            "X-P": "iOS",
+            "X-P": "Android",
             "X-DEVICE-ID": self._device_id,
-            "X-APP-OS-VERSION": "4.9.9",
+            "X-APP-OS-VERSION": "4.9.28",
             "X-PLATFORM": "APP",
             "X-API-SIGNATURE-NONCE": nonce,
-            "User-Agent": (
-                "ZeekrLife/2025061706 CFNetwork/3826.500.131 Darwin/24.5.0"
-            ),
+            "User-Agent": "okhttp/4.12.0",
         }
         if extra:
             headers.update(extra)
@@ -652,14 +665,44 @@ class ZeekrSmsApiClient:
             )
         return result if isinstance(result, dict) else {"code": str(status)}
 
+    def _first_known_vin(self) -> str | None:
+        """A VIN to identify the car with, when one is already known.
+
+        GW3 auth calls carry ``X-VIN`` just like the data calls do.  On the very
+        first login nothing is known yet, which is fine — the header is simply
+        omitted until the (GW2-served) vehicle list has arrived.
+        """
+        if self._vehicles:
+            return self._vehicles[0].vin
+        for vin in self._vehicle_data:
+            return vin
+        return None
+
     @staticmethod
-    def _gw3_extra(vin: str, token: str | None,
-                   app_id: str = "ZEEKRCNCH001M0001") -> dict[str, str]:
-        return {
-            "X-VIN": ZeekrSmsApiClient._encrypt_vin(vin),
-            "X-APP-ID": app_id,
-            "Authorization": token or "",
-        }
+    def _bearer(token: str | None) -> str:
+        """``Authorization`` value for a GW3 access token.
+
+        The gateway answers with the token already prefixed (``"Bearer ey…"``),
+        in which case it is passed through untouched; anything else gets the
+        prefix added so the header is well-formed either way.
+        """
+        if not token:
+            return ""
+        return token if token.lower().startswith("bearer ") else f"Bearer {token}"
+
+    @staticmethod
+    def _gw3_extra(vin: str | None, token: str | None) -> dict[str, str]:
+        """Extra GW3 headers: the encrypted VIN, plus a token when there is one.
+
+        Both are omitted rather than sent blank — the app simply leaves the
+        header out, and an empty-but-present header is not the same request.
+        """
+        extra: dict[str, str] = {}
+        if vin:
+            extra["X-VIN"] = ZeekrSmsApiClient._encrypt_vin(vin)
+        if token:
+            extra["Authorization"] = ZeekrSmsApiClient._bearer(token)
+        return extra
 
     def _absorb_gw3_tokens(self, result: dict[str, Any], what: str) -> bool:
         """Store the tokens of a successful GW3 auth response."""
@@ -693,14 +736,22 @@ class ZeekrSmsApiClient:
             result = await self._gw3(
                 "POST", "/ms-user-auth/v1.0/auth/login",
                 payload={
-                    "loginDeviceType": 1,
+                    "credential": "",
+                    "identifier": "",
                     "identityType": 5,
-                    "loginSystem": "ios",
                     "loginDeviceId": self._device_id,
-                    "token": self._jwt_token or "",
-                    "loginPhoneBrand": "Apple",
+                    "loginDeviceJgId": "",
+                    "loginDeviceType": 1,
+                    "loginPhoneBrand": "Android",
+                    "loginPhoneModel": "Android SDK built for arm64",
+                    "loginSystem": "Android",
+                    # The app forwards the JWT straight out of the GW1 answer,
+                    # which already carries the "Bearer " prefix.
+                    "token": self._bearer(self._jwt_token),
                 },
-                extra={"Authorization": self._jwt_token or ""},
+                # No Authorization header here — the app authenticates this call
+                # with the JWT in the body, but it *does* identify the car.
+                extra=self._gw3_extra(self._first_known_vin(), None),
                 retry=False,
             )
         except ZeekrError as exc:
@@ -729,14 +780,17 @@ class ZeekrSmsApiClient:
             result = await self._gw3(
                 "POST", "/ms-user-auth/v1.0/auth/refreshToken",
                 payload={
-                    "loginDeviceType": 1,
                     "loginDeviceId": self._device_id,
-                    "loginPhoneBrand": "Apple",
-                    "loginSystem": "ios",
+                    "loginDeviceType": 1,
+                    "loginPhoneBrand": "Android",
+                    "loginPhoneModel": "Android SDK built for arm64",
+                    "loginSystem": "Android",
                     "refreshToken": self._new_refresh_token,
                     "accessToken": self._new_access_token,
                 },
-                extra={"Authorization": self._jwt_token or ""},
+                # Mirrors the login call: tokens travel in the body, the request
+                # only carries the encrypted VIN.
+                extra=self._gw3_extra(self._first_known_vin(), None),
                 retry=False,
             )
         except ZeekrError as exc:
@@ -790,7 +844,13 @@ class ZeekrSmsApiClient:
         result = await self._gw3(
             "GET", "/ms-app-bff/api/v3.0/veh/vehicle-list",
             params={"needSharedCar": "true"},
-            extra={"Authorization": self._jwt_token or ""},
+            # The GW3 access token is the one the app presents once logged in;
+            # the GW1 JWT is only the seed used to obtain it.
+            extra={
+                "Authorization": self._bearer(
+                    self._new_access_token or self._jwt_token
+                )
+            },
         )
         data = _payload_of(result)
         if isinstance(data, list):
@@ -851,6 +911,10 @@ class ZeekrSmsApiClient:
         if not self._access_token:
             raise ZeekrAuthError("网关2登录失败：未返回 accessToken")
 
+        # Learn the VIN before talking to GW3: GW2 serves the list happily, and
+        # the GW3 auth call carries X-VIN the way the app's does.
+        await self.async_get_vehicle_list()
+
         await self.snc_login()
         if not self._new_access_token:
             _LOGGER.warning(
@@ -859,7 +923,6 @@ class ZeekrSmsApiClient:
                 self._gw3_login_error,
             )
 
-        await self.async_get_vehicle_list()
         return {"ok": True, "vehicles": [v.vin for v in self._vehicles]}
 
     async def async_bootstrap(self) -> list[ZeekrVehicle]:
@@ -870,9 +933,9 @@ class ZeekrSmsApiClient:
         """
         if not self._jwt_token:
             raise ZeekrAuthError("缺少登录凭据，请重新登录")
-        # GW3 is the only gateway that accepts commands; re-acquire its token on
-        # every start-up (the JWT alone is enough) instead of only at login.
-        await self.async_ensure_gw3_token()
+        # Load the vehicle list first: it is served happily by GW2 even when GW3
+        # is down, and knowing a VIN lets the GW3 auth calls carry X-VIN the way
+        # the app does.
         try:
             await self.async_get_vehicle_list()
         except ZeekrAuthError:
@@ -881,6 +944,9 @@ class ZeekrSmsApiClient:
             raise
         except Exception as exc:  # noqa: BLE001
             raise ZeekrApiError(f"获取车辆列表失败: {exc}") from exc
+        # GW3 is the only gateway that accepts commands; re-acquire its token on
+        # every start-up (the JWT alone is enough) instead of only at login.
+        await self.async_ensure_gw3_token()
         return self._vehicles
 
     # -- data fetching ----------------------------------------------------
@@ -892,9 +958,10 @@ class ZeekrSmsApiClient:
             entries = await self.get_vehicle_list_gw3()
             if entries:
                 source = "gw3"
-        except ZeekrAuthError:
-            raise
         except Exception as exc:  # noqa: BLE001
+            # A GW3-auth failure says nothing about the account credentials —
+            # GW2 is the authority on those and is consulted below.  Raising
+            # here would turn a GW3-side problem into a bogus reauth prompt.
             _LOGGER.debug("GW3 vehicle list failed: %s", exc)
 
         if not entries and self._access_token:
@@ -936,9 +1003,9 @@ class ZeekrSmsApiClient:
                         raw.setdefault(key, value)
                     self._status_source[vin] = "gw3"
                     return raw
-            except ZeekrAuthError:
-                raise
             except Exception as exc:  # noqa: BLE001
+                # GW3 auth problems must not be mistaken for dead account
+                # credentials — GW2 below decides that.
                 _LOGGER.debug("GW3 status failed for %s: %s", vin, exc)
 
         try:
@@ -969,9 +1036,8 @@ class ZeekrSmsApiClient:
                 data = _payload_of(result)
                 if isinstance(data, dict) and data:
                     extras[key] = data
-            except ZeekrAuthError:
-                raise
             except Exception as exc:  # noqa: BLE001
+                # Auxiliary payloads (charging status/limit) are optional.
                 _LOGGER.debug("GW3 %s failed for %s: %s", key, vin, exc)
         return extras
 

@@ -225,16 +225,24 @@
 
 #### `079025 Signature authentication failed`
 
-网关说请求签名不对。已知原因：GW3 的签名串里含有「请求体 md5」，
-而签名是按**紧凑 JSON**（`{"a":1}`，源自 App 的 `JSON.stringify`）算的，
-实际发送却可能是带空格的 JSON（`{"a": 1}`）——两者 md5 不同，于是所有
-**POST**（含 GW3 登录）被拒，而**不带请求体的 GET** 正常。0.3.6 起已统一为
-「签什么就发什么」，正常不会再出现。
+网关说请求签名不对。已知的两个成因（0.3.7 起都已修正）：
+
+1. **`X-APP-ID` 用错。** GW3 的所有端点——**包括登录**——都必须用同一个
+   `X-APP-ID`；网关按它去查签名密钥，查不到就报签名失败（而不是报「app 不存在」）。
+   历史上登录/刷新/车辆列表误用了另一个 id，所以登录被拒、车辆列表回退 GW2，
+   而没有 GW3 令牌又让车辆状态也走了 GW2。
+2. **签的字节和发的字节不一致。** 签名串里含「请求体 md5」，而签名按**紧凑 JSON**
+   （`{"a":1}`，源自 App 的 `JSON.stringify`）计算，实际发送却可能带空格
+   （`{"a": 1}`）——两者 md5 不同，于是所有 **POST** 被拒。
+
+请求头现在是对照官方 App 的抓包逐项对齐的（`AppId`、`X-APP-OS-VERSION`、
+`User-Agent`、`Content-Type` 的空格、nonce 为带横线的 UUID 等），
+登录/刷新按 App 的做法把 JWT 放在请求体里而**不发 `Authorization`**，同时带上
+`X-VIN`。
 
 若仍出现，诊断的 `gateways.gw3_last_rejected` 会给出该请求的形状（请求方法、
 路径、`X-APP-ID`、参与签名的头名列表、请求体 md5、是否带 Authorization），
-同时 `gateways.status_source` / `vehicle_list_source` 会告诉你 GET 类请求
-究竟走没走通 GW3 —— 这两点合起来能判断是「签名串构造」还是「登录态」问题。
+`status_source` / `vehicle_list_source` 则说明每份数据实际取自 gw3 还是 gw2。
 
 > 诊断里的 `gateways.status_source` 会显示每次车辆状态是从 `gw3` 还是 `gw2`
 > 取的，`vehicle_list_source` 同理 —— 这两个字段能区分「网关可用但某接口失败」

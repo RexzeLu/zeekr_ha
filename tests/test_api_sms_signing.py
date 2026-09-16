@@ -170,13 +170,26 @@ LOGIN_PAYLOAD = {
     "loginPhoneBrand": "Apple",
 }
 
+VIN = "L6T77HCE9PF081833"
+
 _OK = {"code": "000000", "msg": "OK", "data": {"accessToken": "gw3-token"}}
+
+
+def _fake_encrypt_vin(vin: str) -> str:
+    """Stand-in for the AES VIN cipher (pycryptodome is not a test dep)."""
+    return f"ENC({vin})"
+
+
+api_sms.ZeekrSmsApiClient._encrypt_vin = staticmethod(_fake_encrypt_vin)
 
 
 def _client(body: dict = _OK):
     session = _FakeSession(body)
     client = api_sms.ZeekrSmsApiClient(session)
     client._jwt_token = "jwt-token-value"
+    # Pretend the vehicle list is already known, so the auth calls can carry
+    # X-VIN the way the official app does.
+    client._vehicle_data[VIN] = {}
     return client, session
 
 
@@ -286,7 +299,7 @@ def test_gw3_reporting_helpers_do_not_leak_tokens():
     shape = client.gateway_summary()["gw3_last_request"]
     assert shape["method"] == "POST"
     assert shape["path"] == LOGIN_PATH
-    assert shape["app_id"] == "ZEEKRCNCH001M0000"
+    assert shape["app_id"] == "ZEEKRCNCH001M0001"
     assert shape["body_md5_b64"] is not None
     assert shape["has_authorization"] is True
     assert "authorization" in [h.lower() for h in shape["signed_headers"]]
@@ -294,6 +307,69 @@ def test_gw3_reporting_helpers_do_not_leak_tokens():
     blob = json.dumps(client.gateway_summary())
     assert "jwt-token-value" not in blob
     assert "gw3-token" not in blob
+
+
+def test_gw3_headers_match_the_official_app():
+    """The gateway looks its signing key up by X-APP-ID.
+
+    ``ZEEKRCNCH001M0000`` used to be sent on the auth calls, which the gateway
+    answered with ``079025 Signature authentication failed`` — every GW3 call
+    must use the same id, and it is the one the real app sends.
+    """
+    client, session = _client()
+
+    asyncio.run(client._gw3("POST", LOGIN_PATH, payload=LOGIN_PAYLOAD,
+                            extra=_login_extra(), retry=False))
+
+    headers = session.calls[0]["headers"]
+    assert headers["X-APP-ID"] == "ZEEKRCNCH001M0001"
+    assert headers["AppId"] == "ONEX97FB91F061405"
+    assert headers["Content-Type"] == "application/json; charset=UTF-8"
+    assert headers["X-API-SIGNATURE-VERSION"] == "2.0"
+    assert headers["X-PROJECT-ID"] == "ZEEKR"
+    assert headers["X-PLATFORM"] == "APP"
+    assert headers["Accept-Language"] == "en-US"
+    assert headers["X-APP-OS-VERSION"] == "4.9.28"
+    assert headers["X-P"] == "Android"
+    assert headers["User-Agent"] == "okhttp/4.12.0"
+    # A plain dashed UUID, as the app sends it.
+    assert len(headers["X-API-SIGNATURE-NONCE"]) == 36
+    assert headers["X-API-SIGNATURE-NONCE"].count("-") == 4
+
+
+def test_gw3_auth_calls_identify_the_car_but_carry_no_bearer():
+    """The app authenticates login/refresh with the JWT *in the body*."""
+    client, session = _client()
+
+    asyncio.run(client.snc_login())
+
+    headers = session.calls[0]["headers"]
+    assert "Authorization" not in headers
+    assert headers["X-VIN"] == f"ENC({VIN})"
+    payload = json.loads(_wire_body(session.calls[0]))
+    # The GW1 answer hands back "Bearer <jwt>" and the app forwards it verbatim.
+    assert payload["token"] == "Bearer jwt-token-value"
+    assert payload["identityType"] == 5
+    assert payload["loginDeviceType"] == 1
+    assert payload["loginSystem"] == "Android"
+    assert payload["loginPhoneBrand"] == "Android"
+    assert payload["credential"] == ""
+    assert payload["loginDeviceJgId"] == ""
+
+
+def test_gw3_extra_prefixes_a_bare_access_token():
+    client, _ = _client()
+    # The gateway hands the token back already prefixed; it must not be doubled.
+    client._new_access_token = "Bearer eyJhbGci"
+    assert client._gw3_extra(VIN, client._new_access_token)["Authorization"] == (
+        "Bearer eyJhbGci"
+    )
+    client._new_access_token = "eyJhbGci"
+    assert client._gw3_extra(VIN, client._new_access_token)["Authorization"] == (
+        "Bearer eyJhbGci"
+    )
+    # Without a known VIN the header is simply left out.
+    assert "X-VIN" not in client._gw3_extra(None, "t")
 
 
 def test_gw3_rejected_request_is_kept_for_diagnostics():
