@@ -38,6 +38,22 @@
 
 依赖：`pycryptodome>=3.20.0`（`manifest.json` 中已声明，HA 会自动安装）。
 
+### 集成图标不显示
+
+仓库里带有 `brand/` 图标，但**本地 `brand/` 目录需要 Home Assistant 2026.3
+或更高版本**才会被读取 —— 这是 HA 的规则，不是集成的问题。更早的版本里，
+自定义集成的品牌图片只能来自官方
+[brands 仓库](https://github.com/home-assistant/brands)，所以旧版 HA 上
+看不到图标（不影响任何功能）。
+
+- **HA ≥ 2026.3**：更新集成并重启，图标会自动出现。
+- **HA < 2026.3**：升级 HA；或者把 `custom_components/zeekr_ev/brand/` 下的
+  六个文件按原文件名提交到 brands 仓库的 `custom_integrations/zeekr_ev/`
+  —— 合并后任何 HA 版本都能看到。
+
+图标可以用 `tools/generate_brand_images.py` 重新生成（只用标准库，
+不需要 Pillow / numpy）。
+
 ## 配置
 
 1. 「设置 → 设备与服务 → 添加集成」，搜索 **Zeekr EV**
