@@ -115,6 +115,26 @@ def _pick(data: Any, *keys: str) -> Any:
     return None
 
 
+def _json_body(payload: Any) -> bytes | None:
+    """Serialise a request body exactly the way the signatures hash it.
+
+    GW2 and GW3 embed ``base64(md5(body))`` in their canonical string, so the
+    bytes we sign and the bytes we put on the wire must be **byte-identical**.
+    The reference client is a JavaScript app, where ``JSON.stringify`` emits
+    compact JSON — no spaces after ``:`` or ``,`` — which is what
+    ``separators=(",", ":")`` reproduces.
+
+    Passing ``json=payload`` to aiohttp instead lets ``json.dumps`` use its
+    default ``", "`` / ``": "`` separators, so every POST was signed over one
+    byte string and sent as another.  The gateway answers
+    ``079025 Signature authentication failed`` for all of them (login included),
+    while GETs — which carry no body — kept working.
+    """
+    if payload is None:
+        return None
+    return json.dumps(payload, separators=(",", ":")).encode()
+
+
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
@@ -206,6 +226,10 @@ class ZeekrSmsApiClient:
         # exactly what later shows up as "缺少 GW3 访问令牌".
         self._gw3_login: dict[str, Any] | None = None
         self._gw3_login_error: str | None = None
+        # Shape of the most recent GW3 request — what a "signature
+        # authentication failed" has to be compared against.
+        self._gw3_last_request: dict[str, Any] | None = None
+        self._gw3_last_rejected: dict[str, Any] | None = None
         # Which gateway actually served the data (diagnostics only).
         self._status_source: dict[str, str] = {}
         self._vehicle_list_source: str | None = None
@@ -285,6 +309,8 @@ class ZeekrSmsApiClient:
             "gw3_login_error": self._gw3_login_error,
             "vehicle_list_source": self._vehicle_list_source,
             "status_source": dict(self._status_source),
+            "gw3_last_request": self._gw3_last_request,
+            "gw3_last_rejected": self._gw3_last_rejected,
         }
 
     # -- signing / gateway plumbing --------------------------------------
@@ -325,8 +351,7 @@ class ZeekrSmsApiClient:
     def _sign_gw2(self, method: str, path: str, params: dict | None,
                   payload: Any, ts: str, nonce: str) -> str:
         body_b64 = _b64(hashlib.md5(
-            json.dumps(payload, separators=(",", ":")).encode()
-            if payload else b""
+            _json_body(payload) or b""
         ).digest())
         qs_str = "&".join(f"{k}={v}" for k, v in sorted((params or {}).items()))
         signing = "\n".join([
@@ -395,11 +420,10 @@ class ZeekrSmsApiClient:
             if params else ""
         )
         ctype = headers.get("Content-Type", headers.get("content-type", "")).lower()
+        body = _json_body(payload)
         body_part = ""
-        if payload and "application/json" in ctype:
-            body_part = _b64(hashlib.md5(
-                json.dumps(payload, separators=(",", ":")).encode()
-            ).digest()) + "\n"
+        if body is not None and "application/json" in ctype:
+            body_part = _b64(hashlib.md5(body).digest()) + "\n"
         canonical = head_part + query_part + body_part + method.upper() + "\n" + path
         return hmac.new(_SNC_SECRET.encode(), canonical.encode(),
                         hashlib.sha256).hexdigest()
@@ -439,10 +463,17 @@ class ZeekrSmsApiClient:
 
     async def _request(self, method: str, url: str, headers: dict[str, str],
                        payload: Any) -> tuple[Any, int]:
-        """Perform the HTTP call, tolerating non-JSON bodies."""
-        async with self._session.request(
-            method, url, headers=headers, json=payload
-        ) as response:
+        """Perform the HTTP call, tolerating non-JSON bodies.
+
+        The body is serialised here — not handed to aiohttp as ``json=`` — so the
+        bytes on the wire are exactly the ones the signature hashed.  See
+        :func:`_json_body` for why that matters.
+        """
+        body = _json_body(payload)
+        request_kwargs: dict[str, Any] = {"headers": headers}
+        if body is not None:
+            request_kwargs["data"] = body
+        async with self._session.request(method, url, **request_kwargs) as response:
             status = response.status
             try:
                 return await response.json(content_type=None), status
@@ -565,12 +596,53 @@ class ZeekrSmsApiClient:
 
     # -- GW3 --------------------------------------------------------------
 
+    def _gw3_request_shape(self, method: str, path: str, headers: dict[str, str],
+                           params: dict | None, payload: Any) -> dict[str, Any]:
+        """Describe a GW3 request without its secrets.
+
+        A ``Signature authentication failed`` is only actionable if we can see
+        which headers went into the canonical string and which app id was used —
+        those are exactly the two things that differ between the endpoints that
+        work (GET, no body) and the ones that get rejected (POST).
+        """
+        body = _json_body(payload)
+        return {
+            "method": method.upper(),
+            "path": path,
+            "app_id": headers.get("X-APP-ID"),
+            # In the order the canonical string signs them.
+            "signed_headers": sorted(
+                key for key, value in headers.items()
+                if key.lower() in self._GW3_SIGNED and value
+            ),
+            "query": "&".join(
+                f"{k}={v}" for k, v in sorted((params or {}).items())
+            ),
+            "body_md5_b64": _b64(hashlib.md5(body).digest())
+            if body is not None else None,
+            "content_type": headers.get(
+                "Content-Type", headers.get("content-type")
+            ),
+            "has_authorization": bool(headers.get("Authorization")),
+        }
+
     async def _gw3(self, method: str, path: str, params: dict | None = None,
                    payload: Any = None, extra: dict[str, str] | None = None,
                    retry: bool = True) -> dict[str, Any]:
         url = self._with_query(f"{_GW3_BASE}{path}", params)
         headers = self._gw3_headers(method, path, params, payload, extra)
+        shape = self._gw3_request_shape(method, path, headers, params, payload)
+        self._gw3_last_request = shape
         result, status = await self._request(method, url, headers, payload)
+        if not isinstance(result, dict) or result.get("code") != _SUCCESS:
+            # Kept apart from ``last_request``: the coordinator keeps polling
+            # GETs after a command fails, and those would overwrite the very
+            # request we need to look at.
+            self._gw3_last_rejected = {
+                **shape,
+                "status": status,
+                "response": _response_brief(result),
+            }
         if _looks_like_auth_error(result, status):
             if retry and await self.async_refresh():
                 return await self._gw3(method, path, params, payload, extra,

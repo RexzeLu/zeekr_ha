@@ -223,6 +223,19 @@
 | 提示「重新认证」 | 到「设置 → 设备与服务 → 极氪」点「重新认证」重新收短信登录 |
 | 一直取不到 | 下载诊断信息，看 `gateways` 段：`gw3_login` 是网关原始应答，`gw3_login_error` 是集成判定的原因 |
 
+#### `079025 Signature authentication failed`
+
+网关说请求签名不对。已知原因：GW3 的签名串里含有「请求体 md5」，
+而签名是按**紧凑 JSON**（`{"a":1}`，源自 App 的 `JSON.stringify`）算的，
+实际发送却可能是带空格的 JSON（`{"a": 1}`）——两者 md5 不同，于是所有
+**POST**（含 GW3 登录）被拒，而**不带请求体的 GET** 正常。0.3.6 起已统一为
+「签什么就发什么」，正常不会再出现。
+
+若仍出现，诊断的 `gateways.gw3_last_rejected` 会给出该请求的形状（请求方法、
+路径、`X-APP-ID`、参与签名的头名列表、请求体 md5、是否带 Authorization），
+同时 `gateways.status_source` / `vehicle_list_source` 会告诉你 GET 类请求
+究竟走没走通 GW3 —— 这两点合起来能判断是「签名串构造」还是「登录态」问题。
+
 > 诊断里的 `gateways.status_source` 会显示每次车辆状态是从 `gw3` 还是 `gw2`
 > 取的，`vehicle_list_source` 同理 —— 这两个字段能区分「网关可用但某接口失败」
 > 和「整体登录态已失效」。
