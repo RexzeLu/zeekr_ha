@@ -1111,3 +1111,68 @@ def test_the_platform_chain_is_attempted_only_once_per_process():
     before = len(session.calls)
     asyncio.run(client._gw3("GET", path, vin=VIN, token="gw3-token", retry=False))
     assert len(session.calls) - before == 1               # one plain request only
+
+
+# ---------------------------------------------------------------------------
+# Login variants: a knob is only kept if a vehicle interface answers it
+# ---------------------------------------------------------------------------
+
+
+def test_a_login_variant_that_opens_the_vehicle_interface_is_adopted():
+    client, session = _client([
+        {"code": "000000", "data": {"accessToken": "variant-token"}},   # login
+        {"code": "000000", "data": {"additionalVehicleStatus": {}}},    # status
+    ])
+
+    ok = asyncio.run(
+        client._login_variant("sig-2.1", {"X-API-SIGNATURE-VERSION": "2.1"})
+    )
+
+    assert ok is True
+    # Both the login and the status probe carried the override …
+    for call in session.calls:
+        assert call["headers"]["X-API-SIGNATURE-VERSION"] == "2.1"
+    # … and it stays in force, so an adopted variant is a fix rather than a note.
+    assert client._variant_headers == {"X-API-SIGNATURE-VERSION": "2.1"}
+    assert client.gateway_summary()["gw3_token_source"] == "sig-2.1"
+
+    asyncio.run(client._gw3("GET", "/ms-vehicle-status/api/v1.0/vehicle/status/latest",
+                            vin=VIN, token="variant-token"))
+    assert session.calls[-1]["headers"]["X-API-SIGNATURE-VERSION"] == "2.1"
+
+
+def test_a_variant_that_does_not_open_the_interface_is_not_adopted():
+    """A successful login proves nothing — the token is minted either way."""
+    client, _ = _client([
+        {"code": "000000", "data": {"accessToken": "variant-token"}},
+        {"code": "079001", "msg": "[SDK]此接口未被授权，无法访问!"},
+    ])
+
+    ok = asyncio.run(
+        client._login_variant("project-ZEEKR_CN", {"X-PROJECT-ID": "ZEEKR_CN"})
+    )
+
+    assert ok is False
+    assert client._variant_headers == {}
+    assert client.gateway_summary()["gw3_token_source"] == "legacy"
+    # The verdict is on record, so one dump shows every knob that was tried.
+    verdicts = client.gateway_summary()["platform_chain"]
+    assert verdicts[-1]["step"] == "project-ZEEKR_CN"
+    assert verdicts[-1]["verdict"]["code"] == "079001"
+
+
+def test_tsp_code_probe_records_the_host_and_the_error_body_shape():
+    """A 404 must be attributable to a specific host+prefix pair."""
+    client, _ = _client({"timestamp": "x", "status": 404, "error": "Not Found"})
+    client._platform_chain_done = False
+
+    asyncio.run(client._fetch_tsp_code())
+
+    attempts = client.gateway_summary()["platform_chain"]
+    assert len(attempts) == api_sms._TSP_CODE_ATTEMPT_LIMIT
+    assert attempts[0]["host"] == "api-gw-toc.zeekrlife.com"
+    assert attempts[0]["path"].endswith("/user/tspCode")
+    assert attempts[0]["got_code"] is False
+    # A proxy/Spring error body has no code/msg of ours — record its shape so
+    # "route missing" is distinguishable from "we were refused".
+    assert attempts[0]["top_keys"] == ["error", "status", "timestamp"]

@@ -67,7 +67,8 @@ _SNC_SECRET = "890efe3207af95348b95f66b2ee7da04"
 _AES_KEY = "a01a6db985a2f5d4"
 _AES_IV = "ed446b8b8845013d"
 
-_GW1_BASE = "https://api-gw-toc.zeekrlife.com"
+_GW1_HOST = "api-gw-toc.zeekrlife.com"
+_GW1_BASE = f"https://{_GW1_HOST}"
 _GW2_BASE = "https://api.zeekrline.com"
 _GW3_BASE = "https://snc-tsp-api.zeekrlife.com"
 
@@ -104,21 +105,24 @@ _FORBIDDEN_MARKERS = ("未被授权", "not authorized")
 
 # The vehicle interfaces (status, remote control) are authorised by a token
 # minted from a short-lived ``tspCode``, NOT by the legacy ``identityType: 5``
-# login this integration has used from the start.  The published client's chain
-# is ``user/tspCode?tspClientId=<client-id>`` followed by the very same
-# ``ms-user-auth/v1.0/auth/login`` endpoint with ``identityType: 10`` and the
-# code as ``identifier`` — and only that second token is accepted by
-# ``ms-vehicle-status`` / ``ms-remote-control``, which is exactly the boundary
-# ``079001`` draws.  China serves the service under other route prefixes, so the
-# candidates are tried in order and every outcome is recorded for diagnostics.
-_TSP_CODE_PATHS = (
-    "/zeekrlife-app-user/v1/user/tspCode",
-    "/zeekrlife-app-user/v1/user/pub/tspCode",
-    "/zeekr-cuc-idaas/user/tspCode",
-    "/user/tspCode",
+# login this integration has used from the start.  The published client fetches
+# the code from ``user/tspCode`` on its regional IDaaS host — with the region
+# baked into BOTH the host (``gateway-pub-hw-em-sg``) and the path prefix
+# (``zeekr-cuc-idaas-sea``).  China's pair is published nowhere, so the plausible
+# combinations are asked in turn; which host/prefix answers at all is what pins
+# it down.  A 404 costs one request and settles a candidate for good.
+_TSP_CODE_CANDIDATES = (
+    ("api-gw-toc.zeekrlife.com", "/zeekr-cuc-idaas-cn/user/tspCode"),
+    ("api-gw-toc.zeekrlife.com", "/zeekrlife-app-user/v1/user/tspCode"),
+    ("api-gw-toc.zeekrlife.com", "/zeekrlife-mp-auth2/v1/auth/tspCode"),
+    ("api-gw-toc.zeekrlife.com", "/zeekr-cuc-idaas-cn/user/tsp/code"),
+    ("gateway-pub-hw-em-cn.zeekrlife.com", "/zeekr-cuc-idaas-cn/user/tspCode"),
+    ("gateway-pub-hw-em-cn.zeekrlife.com", "/zeekr-cuc-idaas/user/tspCode"),
+    ("gateway-pub-hw-em.zeekrlife.com", "/zeekr-cuc-idaas-cn/user/tspCode"),
+    ("gateway-pub-hw-cn.zeekrlife.com", "/zeekr-cuc-idaas-cn/user/tspCode"),
 )
 # ``client-id`` values known from the published clients.  The account's own id
-# (handed out by GW2) is tried first — it is the one that describes this user.
+# (handed out by GW2) is preferred — it is the one that describes this user.
 _TSP_CLIENT_IDS = (
     "1JwLroFkFFIpgFGdTRrm4_nzkkwDkfHj7RxJQb7J8tc",
     "2JwLroFkFFIpgFGdTRrm4_nzkkwDkfHj7RxJQb7J8tc",
@@ -127,6 +131,19 @@ _TSP_CLIENT_IDS = (
 # already told us the current token cannot reach a vehicle interface.  A build
 # that never needs it pays nothing.
 _TSP_CODE_ATTEMPT_LIMIT = 8
+
+# Header knobs that could plausibly move the interface authorisation, cheapest
+# and best-documented first.  ``2.1`` is what a China-specific integration sends
+# for China calls (the published clients send ``2.0``), and the gateway validates
+# ``X-PROJECT-ID`` against a per-region enum, so a China-specific value is worth
+# one login.  Each is judged by whether a vehicle interface answers it.
+_LOGIN_VARIANTS = (
+    ("sig-2.1", {"X-API-SIGNATURE-VERSION": "2.1"}),
+    ("project-ZEEKR_CN", {"X-PROJECT-ID": "ZEEKR_CN"}),
+    ("sig-2.1+ZEEKR_CN", {
+        "X-API-SIGNATURE-VERSION": "2.1", "X-PROJECT-ID": "ZEEKR_CN",
+    }),
+)
 
 # "Decrypt X-VIN failed" — the gateway could not open the ``X-VIN`` header it
 # was given.  The app AES-encrypts the VIN (see :meth:`ZeekrSmsApiClient.
@@ -420,6 +437,9 @@ class ZeekrSmsApiClient:
         # Steps of the one-shot tspCode chain, and whether it already ran.
         self._platform_chain: list[dict[str, Any]] = []
         self._platform_chain_done = False
+        # Header overrides adopted from a login variant that turned out to open
+        # the vehicle interfaces; applied to every request while it is set.
+        self._variant_headers: dict[str, str] = {}
 
     # -- token persistence ------------------------------------------------
 
@@ -744,8 +764,11 @@ class ZeekrSmsApiClient:
     # -- GW1 --------------------------------------------------------------
 
     async def _gw1(self, method: str, path: str, params: dict | None = None,
-                   payload: Any = None) -> dict[str, Any]:
-        url = self._with_query(f"{_GW1_BASE}{path}", params)
+                   payload: Any = None,
+                   host: str | None = None) -> dict[str, Any]:
+        # ``host`` exists for the tspCode probes: the regional IDaaS host is one
+        # of the unknowns, so it must be overridable without a second code path.
+        url = self._with_query(f"https://{host or _GW1_HOST}{path}", params)
         result, status = await self._request(method, url, self._gw1_headers(), payload)
         return result if isinstance(result, dict) else {"code": str(status)}
 
@@ -895,10 +918,17 @@ class ZeekrSmsApiClient:
     async def _gw3(self, method: str, path: str, params: dict | None = None,
                    payload: Any = None, token: str | None = None,
                    vin: str | None = None, retry: bool = True,
-                   vin_encrypted: bool | None = None) -> dict[str, Any]:
+                   vin_encrypted: bool | None = None,
+                   headers_extra: dict[str, str] | None = None
+                   ) -> dict[str, Any]:
         # The auth headers are derived here rather than by the caller so that a
         # retry with a different X-VIN encoding actually changes the request.
         extra = self._gw3_auth_headers(vin, token, vin_encrypted)
+        # Overrides that a successful probe adopted stay in force: a variant is
+        # only worth adopting if every later request keeps using it.
+        extra.update(self._variant_headers)
+        if headers_extra:
+            extra.update(headers_extra)
         url = self._with_query(f"{_GW3_BASE}{path}", params)
         headers = self._gw3_headers(method, path, params, payload, extra)
         shape = self._gw3_request_shape(method, path, headers, params, payload)
@@ -1336,103 +1366,184 @@ class ZeekrSmsApiClient:
     async def _fetch_tsp_code(self) -> str | None:
         """Mint the short-lived ``tspCode`` that the platform login exchanges.
 
-        Returns the code, or None when no candidate answered — either way every
-        attempt lands in :attr:`_platform_chain`, because "which route does
-        China use, and with which client id" is the one question this build
-        cannot answer from the published clients alone.
+        The published client fetches it from ``user/tspCode`` on its regional
+        IDaaS host, with the region baked into both the host and the path
+        prefix (``gateway-pub-hw-em-sg`` / ``zeekr-cuc-idaas-sea``).  China's
+        pair is not published anywhere, so the candidates are asked in turn and
+        every answer — including "this route does not exist" — is recorded:
+        which host and prefix answer at all is precisely what pins China down.
         """
-        client_ids = [cid for cid in (self._client_id, *_TSP_CLIENT_IDS) if cid]
+        client_id = self._client_id or _TSP_CLIENT_IDS[0]
         attempts = 0
-        for path in _TSP_CODE_PATHS:
-            for client_id in client_ids:
-                if attempts >= _TSP_CODE_ATTEMPT_LIMIT:
-                    return None
-                attempts += 1
-                try:
-                    result = await self._gw1(
-                        "GET", path, params={"tspClientId": client_id}
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    self._platform_chain.append(
-                        {"step": "tspCode", "path": path, "error": str(exc)}
-                    )
-                    continue
-                brief = _response_brief(result)
-                data = result.get("data") if isinstance(result, dict) else None
-                code = data.get("code") if isinstance(data, dict) else None
+        for host, path in _TSP_CODE_CANDIDATES:
+            if attempts >= _TSP_CODE_ATTEMPT_LIMIT:
+                break
+            attempts += 1
+            try:
+                result = await self._gw1(
+                    "GET", path, params={"tspClientId": client_id}, host=host
+                )
+            except Exception as exc:  # noqa: BLE001
                 self._platform_chain.append({
-                    "step": "tspCode",
-                    "path": path,
-                    "code": brief.get("code"),
-                    "msg": brief.get("msg"),
-                    "got_code": bool(code),
+                    "step": "tspCode", "host": host, "path": path,
+                    "error": str(exc)[:160],
                 })
-                if code:
-                    return str(code)
+                continue
+            brief = _response_brief(result)
+            data = result.get("data") if isinstance(result, dict) else None
+            code = data.get("code") if isinstance(data, dict) else None
+            self._platform_chain.append({
+                "step": "tspCode", "host": host, "path": path,
+                "code": brief.get("code"),
+                "msg": brief.get("msg"),
+                # Distinguishes "our envelope said no" from a proxy/Spring error
+                # body, which is what a wrong route usually answers with.
+                "top_keys": sorted(result) if isinstance(result, dict) else None,
+                "got_code": bool(code),
+            })
+            if code:
+                return str(code)
         return None
 
+    def _legacy_login_body(self) -> dict[str, Any]:
+        """The body of the login this integration has always used."""
+        return {
+            "credential": "",
+            "identifier": "",
+            "identityType": 5,
+            "loginDeviceId": self._login_device_id,
+            "loginDeviceJgId": "",
+            "loginDeviceType": 1,
+            "loginPhoneBrand": "Android",
+            "loginPhoneModel": "Android SDK built for arm64",
+            "loginSystem": "Android",
+            # The app forwards the JWT straight out of the GW1 answer, which
+            # already carries the "Bearer " prefix.
+            "token": self._bearer(self._jwt_token),
+        }
+
+    async def _login_variant(self, name: str, headers: dict[str, str] | None,
+                             body: dict[str, Any] | None = None) -> bool:
+        """Log in again with overrides, then see if a vehicle interface opens.
+
+        A login alone proves nothing — the token is minted either way — so each
+        variant is judged by the only thing that matters: whether
+        ``ms-vehicle-status`` answers it.  On success the overrides are kept for
+        every later request, which is what makes this a fix and not a report.
+        """
+        payload = self._legacy_login_body()
+        if body:
+            payload.update(body)
+        try:
+            result = await self._gw3(
+                "POST", "/ms-user-auth/v1.0/auth/login", payload=payload,
+                vin=self._first_known_vin(), vin_encrypted=True, retry=False,
+                headers_extra=headers,
+            )
+            if result.get("code") == _SUCCESS and self._absorb_gw3_tokens(
+                result, name
+            ):
+                probe = await self._gw3(
+                    "GET", "/ms-vehicle-status/api/v1.0/vehicle/status/latest",
+                    params={"latest": "", "target": "new"},
+                    token=self._new_access_token,
+                    vin=self._first_known_vin(), vin_encrypted=True,
+                    retry=False, headers_extra=headers,
+                )
+                verdict = _response_brief(probe)
+                ok = probe.get("code") == _SUCCESS
+            else:
+                verdict = {"login": _response_brief(result)}
+                ok = False
+        except ZeekrError as exc:
+            self._platform_chain.append(
+                {"step": name, "error": str(exc)[:160]}
+            )
+            return False
+
+        self._platform_chain.append({"step": name, "verdict": verdict})
+        if not ok:
+            return False
+
+        self._variant_headers = dict(headers or {})
+        self._gw3_token_source = name
+        _LOGGER.warning("登录变体「%s」可以访问车辆接口，已采用该配置", name)
+        return True
+
     async def _platform_token(self) -> bool:
-        """Re-login with a ``tspCode`` to obtain a token the interfaces accept.
+        """Find a login the vehicle interfaces will actually authorise.
 
         ``079001 此接口未被授权`` is what the legacy token gets on
         ``ms-vehicle-status`` / ``ms-remote-control`` while the legacy vehicle
-        list keeps working — the two live on different generations of the
-        platform, and the older token is not extended to the newer interfaces.
-        Raising a new platform token is the published remedy, so it is tried
-        once, on demand, and only when the gateway has already said as much.
+        list keeps working.  The X-VIN control rules the header out (a
+        deliberately invalid ciphertext fails decryption, ours decrypts, so the
+        key is right and the refusal happens *after* decryption), which leaves
+        the token's interface authorisation.
+
+        The published client reaches it by exchanging a ``tspCode``, and the
+        platform notes describe exactly that split — but the China pair is
+        unpublished, so the knobs are tried in order of how well they are
+        documented, each judged by whether a vehicle interface answers.  One
+        shot per process, on demand only.
         """
         if self._platform_chain_done:
             return False
         self._platform_chain_done = True
 
         tsp_code = await self._fetch_tsp_code()
-        if not tsp_code:
-            _LOGGER.debug("未能取得 tspCode，继续使用旧登录令牌")
-            return False
+        if tsp_code:
+            try:
+                result = await self._gw3(
+                    "POST", "/ms-user-auth/v1.0/auth/login",
+                    payload={
+                        # ``identifier`` carries the code and there is
+                        # deliberately no ``token`` field: this is the
+                        # platform's own login, not the GW1 JWT hand-off.
+                        "identifier": tsp_code,
+                        "identityType": 10,
+                        "loginDeviceId": self._login_device_id,
+                        "loginDeviceJgId": "",
+                        "loginDeviceType": 1,
+                        "loginPhoneBrand": "Android",
+                        "loginPhoneModel": "Android SDK built for arm64",
+                        "loginSystem": "Android",
+                    },
+                    vin=self._first_known_vin(), vin_encrypted=True,
+                    retry=False,
+                )
+                brief = _response_brief(result)
+                self._gw3_login = brief
+                self._platform_chain.append(
+                    {"step": "platformLogin", "verdict": brief}
+                )
+                if result.get("code") == _SUCCESS and self._absorb_gw3_tokens(
+                    result, "平台登录"
+                ):
+                    self._gw3_token_source = "platform"
+                    _LOGGER.warning(
+                        "已改用新平台令牌（identityType 10 + tspCode）访问车辆接口"
+                    )
+                    return True
+            except ZeekrError as exc:
+                self._platform_chain.append(
+                    {"step": "platformLogin", "error": str(exc)[:160]}
+                )
+        else:
+            _LOGGER.debug("未能取得 tspCode，改为试探其它登录变体")
 
-        try:
-            result = await self._gw3(
-                "POST", "/ms-user-auth/v1.0/auth/login",
-                payload={
-                    # ``identifier`` carries the code and there is deliberately
-                    # no ``token`` field: this is the platform's own login, not
-                    # the GW1 JWT hand-off.
-                    "identifier": tsp_code,
-                    "identityType": 10,
-                    "loginDeviceId": self._login_device_id,
-                    "loginDeviceJgId": "",
-                    "loginDeviceType": 1,
-                    "loginPhoneBrand": "Android",
-                    "loginPhoneModel": "Android SDK built for arm64",
-                    "loginSystem": "Android",
-                },
-                vin=self._first_known_vin(), vin_encrypted=True,
-                retry=False,
-            )
-        except ZeekrError as exc:
-            self._platform_chain.append(
-                {"step": "platformLogin", "error": str(exc)}
-            )
-            return False
+        # The token is minted either way and the legacy list still needs one, so
+        # the last thing we do is put a known-good legacy token back.
+        for name, headers in _LOGIN_VARIANTS:
+            try:
+                if await self._login_variant(name, headers):
+                    return True
+            except Exception as exc:  # noqa: BLE001 - a probe must not break setup
+                self._platform_chain.append(
+                    {"step": name, "error": str(exc)[:160]}
+                )
 
-        brief = _response_brief(result)
-        self._gw3_login = brief
-        self._platform_chain.append({
-            "step": "platformLogin",
-            "code": brief.get("code"),
-            "msg": brief.get("msg"),
-            "data_keys": brief.get("data_keys"),
-        })
-        if result.get("code") != _SUCCESS:
-            return False
-        if not self._absorb_gw3_tokens(result, "平台登录"):
-            return False
-
-        self._gw3_token_source = "platform"
-        _LOGGER.warning(
-            "已改用新平台令牌（identityType 10 + tspCode）访问车辆状态与指令接口"
-        )
-        return True
+        await self.snc_login()
+        return False
 
     async def async_ensure_gw3_token(self) -> bool:
         """Make sure a GW3 token exists, renewing it when possible.
