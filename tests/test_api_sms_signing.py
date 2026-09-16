@@ -138,17 +138,31 @@ def _wire_body(call: dict) -> bytes | None:
 
 def _canonical(method: str, path: str, headers: dict, params: dict | None,
                body: bytes | None) -> str:
+    """Rebuild the GW3 canonical string the way the reference client does.
+
+    This mirrors the Node-RED flow captured alongside the app — the ground truth
+    for the algorithm — including the query substitutions and the Base64 output.
+    """
     signed = api_sms.ZeekrSmsApiClient._GW3_SIGNED
-    head = "".join(
-        f"{key.lower()}:{headers[key]}\n"
-        for key in sorted(
-            k for k, v in headers.items() if k.lower() in signed and v
-        )
-    )
-    query = (
-        "&".join(f"{k}={v}" for k, v in sorted((params or {}).items())) + "\n"
-        if params else ""
-    )
+    lines = []
+    for key in sorted(headers, key=str.lower):
+        lower = key.lower()
+        if lower not in signed:
+            continue
+        value = headers[key]
+        if lower in ("x-vin", "authorization") and not value:
+            continue
+        lines.append(f"{lower}:{value}\n")
+    head = "".join(lines)
+
+    query = ""
+    if params:
+        parts = []
+        for k in sorted(params):
+            v = str(params[k]).replace("*", "%2A").replace("%2F", "/").replace("%3F", "?")
+            parts.append(f"{k}={v}")
+        query = "&".join(parts) + "\n"
+
     body_part = (
         base64.b64encode(hashlib.md5(body).digest()).decode() + "\n"
         if body is not None else ""
@@ -235,9 +249,13 @@ def test_gw3_signature_covers_the_transmitted_body():
     call = session.calls[0]
     headers = call["headers"]
     canonical = _canonical("POST", LOGIN_PATH, headers, None, _wire_body(call))
-    expected = hmac.new(api_sms._SNC_SECRET.encode(), canonical.encode(),
-                        hashlib.sha256).hexdigest()
+    expected = base64.b64encode(
+        hmac.new(api_sms._SNC_SECRET.encode(), canonical.encode(),
+                 hashlib.sha256).digest()
+    ).decode()
     assert headers["X-SIGNATURE"] == expected
+    # The app emits Base64 (44 chars), not hex (64 chars).
+    assert len(headers["X-SIGNATURE"]) == 44
 
 
 def test_gw3_get_carries_no_body_and_is_signed_without_one():
@@ -252,8 +270,10 @@ def test_gw3_get_carries_no_body_and_is_signed_without_one():
     headers = call["headers"]
     canonical = _canonical("GET", "/ms-app-bff/api/v3.0/veh/vehicle-list",
                            headers, {"needSharedCar": "true"}, None)
-    expected = hmac.new(api_sms._SNC_SECRET.encode(), canonical.encode(),
-                        hashlib.sha256).hexdigest()
+    expected = base64.b64encode(
+        hmac.new(api_sms._SNC_SECRET.encode(), canonical.encode(),
+                 hashlib.sha256).digest()
+    ).decode()
     assert headers["X-SIGNATURE"] == expected
 
 

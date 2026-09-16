@@ -414,27 +414,53 @@ class ZeekrSmsApiClient:
         "accept-language", "x-vin", "x-device-id", "x-platform",
     }
 
+    @staticmethod
+    def _gw3_escape_query(params: dict | None) -> str:
+        """Serialise query params the way the app does.
+
+        The reference client (Node-RED flow / official app) builds the query
+        with these substitutions: ``*`` → ``%2A``, then ``%2F`` → ``/`` and
+        ``%3F`` → ``?`` (undoing those two percent-encodings), keys sorted.
+        """
+        if not params:
+            return ""
+        parts = []
+        for key in sorted(params):
+            value = params[key]
+            escaped = str(value).replace("*", "%2A").replace("%2F", "/").replace("%3F", "?")
+            parts.append(f"{key}={escaped}")
+        return "&".join(parts)
+
     def _sign_gw3(self, method: str, path: str, headers: dict[str, str],
                   params: dict | None, payload: Any) -> str:
-        head_part = "".join(
-            f"{key.lower()}:{headers[key]}\n"
-            for key in sorted(
-                k for k, v in headers.items()
-                if k.lower() in self._GW3_SIGNED and v
-            )
-        )
-        query_part = (
-            "&".join(f"{k}={v}" for k, v in sorted((params or {}).items())) + "\n"
-            if params else ""
-        )
+        # Header part: lower-cased name + value, keys sorted, matching the
+        # reference implementation.  ``x-vin`` / ``authorization`` are dropped
+        # when empty; the other signed headers are emitted as-is.
+        header_lines: list[str] = []
+        for key in sorted(headers, key=str.lower):
+            lower = key.lower()
+            if lower not in self._GW3_SIGNED:
+                continue
+            value = headers[key]
+            if lower in ("x-vin", "authorization") and not value:
+                continue
+            header_lines.append(f"{lower}:{value}\n")
+        head_part = "".join(header_lines)
+
+        query = self._gw3_escape_query(params)
+        query_part = query + "\n" if query else ""
+
         ctype = headers.get("Content-Type", headers.get("content-type", "")).lower()
         body = _json_body(payload)
         body_part = ""
         if body is not None and "application/json" in ctype:
             body_part = _b64(hashlib.md5(body).digest()) + "\n"
+
         canonical = head_part + query_part + body_part + method.upper() + "\n" + path
-        return hmac.new(_SNC_SECRET.encode(), canonical.encode(),
-                        hashlib.sha256).hexdigest()
+        digest = hmac.new(_SNC_SECRET.encode(), canonical.encode(),
+                          hashlib.sha256).digest()
+        # The app encodes the HMAC as Base64, not hex.
+        return _b64(digest)
 
     def _gw3_headers(self, method: str, path: str, params: dict | None,
                      payload: Any, extra: dict[str, str] | None = None
