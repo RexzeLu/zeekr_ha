@@ -102,6 +102,32 @@ _DISPLACED_MARKERS = ("logged in elsewhere", "已在其他设备登录", "别处
 _FORBIDDEN_CODES = {"079001"}
 _FORBIDDEN_MARKERS = ("未被授权", "not authorized")
 
+# The vehicle interfaces (status, remote control) are authorised by a token
+# minted from a short-lived ``tspCode``, NOT by the legacy ``identityType: 5``
+# login this integration has used from the start.  The published client's chain
+# is ``user/tspCode?tspClientId=<client-id>`` followed by the very same
+# ``ms-user-auth/v1.0/auth/login`` endpoint with ``identityType: 10`` and the
+# code as ``identifier`` — and only that second token is accepted by
+# ``ms-vehicle-status`` / ``ms-remote-control``, which is exactly the boundary
+# ``079001`` draws.  China serves the service under other route prefixes, so the
+# candidates are tried in order and every outcome is recorded for diagnostics.
+_TSP_CODE_PATHS = (
+    "/zeekrlife-app-user/v1/user/tspCode",
+    "/zeekrlife-app-user/v1/user/pub/tspCode",
+    "/zeekr-cuc-idaas/user/tspCode",
+    "/user/tspCode",
+)
+# ``client-id`` values known from the published clients.  The account's own id
+# (handed out by GW2) is tried first — it is the one that describes this user.
+_TSP_CLIENT_IDS = (
+    "1JwLroFkFFIpgFGdTRrm4_nzkkwDkfHj7RxJQb7J8tc",
+    "2JwLroFkFFIpgFGdTRrm4_nzkkwDkfHj7RxJQb7J8tc",
+)
+# Hard cap: this runs at most once per process, and only after the gateway has
+# already told us the current token cannot reach a vehicle interface.  A build
+# that never needs it pays nothing.
+_TSP_CODE_ATTEMPT_LIMIT = 8
+
 # "Decrypt X-VIN failed" — the gateway could not open the ``X-VIN`` header it
 # was given.  The app AES-encrypts the VIN (see :meth:`ZeekrSmsApiClient.
 # _encrypt_vin`), so this code always means the header was sent in the wrong
@@ -386,6 +412,14 @@ class ZeekrSmsApiClient:
         # "backend:<field>") — diagnostics only, never the value itself.
         self._vehicle_token: str | None = None
         self._vehicle_token_source: str | None = None
+        # Which generation of the platform minted the GW3 token in hand:
+        # "legacy" (identityType 5 + JWT) or "platform" (tspCode exchange).  The
+        # legacy token reaches the legacy vehicle list but is refused by the
+        # vehicle interfaces with 079001.
+        self._gw3_token_source = "legacy"
+        # Steps of the one-shot tspCode chain, and whether it already ran.
+        self._platform_chain: list[dict[str, Any]] = []
+        self._platform_chain_done = False
 
     # -- token persistence ------------------------------------------------
 
@@ -491,6 +525,12 @@ class ZeekrSmsApiClient:
             # (it is a synthetic brand/model/sdk/release string) and the single
             # most useful field for telling whether the fix took effect.
             "login_device_id": self._login_device_id,
+            # Which generation of the platform minted the token in hand, and the
+            # one-shot tspCode chain that is tried when the gateway refuses a
+            # vehicle interface.  ``platform_chain`` answers "did it work, and
+            # if not, which route said what".
+            "gw3_token_source": self._gw3_token_source,
+            "platform_chain": list(self._platform_chain),
         }
 
     # -- signing / gateway plumbing --------------------------------------
@@ -886,6 +926,18 @@ class ZeekrSmsApiClient:
             raise ZeekrAuthError(
                 f"GW3 鉴权失败: {result.get('msg') if isinstance(result, dict) else status}"
             )
+        # "This interface is not authorized" on an authenticated vehicle call,
+        # while the legacy vehicle list keeps working: the token in hand was
+        # minted by the previous generation of the platform.  Raise a platform
+        # token once and retry with it.  ``token is not None`` keeps this off the
+        # auth calls themselves, and ``_platform_chain_done`` keeps it to a
+        # single attempt per process.
+        if (retry and token is not None and not self._platform_chain_done
+                and _is_forbidden_interface(result)):
+            if await self._platform_token():
+                return await self._gw3(method, path, params, payload,
+                                       token=self._new_access_token, vin=vin,
+                                       retry=False, vin_encrypted=vin_encrypted)
         # Two failures mention the X-VIN header: "decrypt failed" (we sent
         # something it cannot open) and "interface not authorized" (it may have
         # opened it into the wrong VIN).  Spend exactly one request finding out
@@ -1008,6 +1060,11 @@ class ZeekrSmsApiClient:
         A candidate that is accepted is adopted immediately, so a diagnostics
         download can by itself repair the header.  Runs on demand only.
         """
+        # First, because it changes the token every later step uses: if the
+        # gateway is refusing vehicle interfaces, try to raise a platform token.
+        # A successful swap shows up as ``paths`` turning green below.
+        await self._platform_token()
+
         paths: list[dict[str, Any]] = []
         saved_rejected = self._gw3_last_rejected
         saved_attempts = list(self._gw3_vin_attempts)
@@ -1274,6 +1331,109 @@ class ZeekrSmsApiClient:
         )
         return False
 
+    # -- new-platform (TSP) token chain -----------------------------------
+
+    async def _fetch_tsp_code(self) -> str | None:
+        """Mint the short-lived ``tspCode`` that the platform login exchanges.
+
+        Returns the code, or None when no candidate answered — either way every
+        attempt lands in :attr:`_platform_chain`, because "which route does
+        China use, and with which client id" is the one question this build
+        cannot answer from the published clients alone.
+        """
+        client_ids = [cid for cid in (self._client_id, *_TSP_CLIENT_IDS) if cid]
+        attempts = 0
+        for path in _TSP_CODE_PATHS:
+            for client_id in client_ids:
+                if attempts >= _TSP_CODE_ATTEMPT_LIMIT:
+                    return None
+                attempts += 1
+                try:
+                    result = await self._gw1(
+                        "GET", path, params={"tspClientId": client_id}
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._platform_chain.append(
+                        {"step": "tspCode", "path": path, "error": str(exc)}
+                    )
+                    continue
+                brief = _response_brief(result)
+                data = result.get("data") if isinstance(result, dict) else None
+                code = data.get("code") if isinstance(data, dict) else None
+                self._platform_chain.append({
+                    "step": "tspCode",
+                    "path": path,
+                    "code": brief.get("code"),
+                    "msg": brief.get("msg"),
+                    "got_code": bool(code),
+                })
+                if code:
+                    return str(code)
+        return None
+
+    async def _platform_token(self) -> bool:
+        """Re-login with a ``tspCode`` to obtain a token the interfaces accept.
+
+        ``079001 此接口未被授权`` is what the legacy token gets on
+        ``ms-vehicle-status`` / ``ms-remote-control`` while the legacy vehicle
+        list keeps working — the two live on different generations of the
+        platform, and the older token is not extended to the newer interfaces.
+        Raising a new platform token is the published remedy, so it is tried
+        once, on demand, and only when the gateway has already said as much.
+        """
+        if self._platform_chain_done:
+            return False
+        self._platform_chain_done = True
+
+        tsp_code = await self._fetch_tsp_code()
+        if not tsp_code:
+            _LOGGER.debug("未能取得 tspCode，继续使用旧登录令牌")
+            return False
+
+        try:
+            result = await self._gw3(
+                "POST", "/ms-user-auth/v1.0/auth/login",
+                payload={
+                    # ``identifier`` carries the code and there is deliberately
+                    # no ``token`` field: this is the platform's own login, not
+                    # the GW1 JWT hand-off.
+                    "identifier": tsp_code,
+                    "identityType": 10,
+                    "loginDeviceId": self._login_device_id,
+                    "loginDeviceJgId": "",
+                    "loginDeviceType": 1,
+                    "loginPhoneBrand": "Android",
+                    "loginPhoneModel": "Android SDK built for arm64",
+                    "loginSystem": "Android",
+                },
+                vin=self._first_known_vin(), vin_encrypted=True,
+                retry=False,
+            )
+        except ZeekrError as exc:
+            self._platform_chain.append(
+                {"step": "platformLogin", "error": str(exc)}
+            )
+            return False
+
+        brief = _response_brief(result)
+        self._gw3_login = brief
+        self._platform_chain.append({
+            "step": "platformLogin",
+            "code": brief.get("code"),
+            "msg": brief.get("msg"),
+            "data_keys": brief.get("data_keys"),
+        })
+        if result.get("code") != _SUCCESS:
+            return False
+        if not self._absorb_gw3_tokens(result, "平台登录"):
+            return False
+
+        self._gw3_token_source = "platform"
+        _LOGGER.warning(
+            "已改用新平台令牌（identityType 10 + tspCode）访问车辆状态与指令接口"
+        )
+        return True
+
     async def async_ensure_gw3_token(self) -> bool:
         """Make sure a GW3 token exists, renewing it when possible.
 
@@ -1489,12 +1649,21 @@ class ZeekrSmsApiClient:
         return {}
 
     async def _gw3_extras(self, vin: str) -> dict[str, Any]:
-        """Fetch auxiliary GW3 payloads (charging status/limit)."""
+        """Fetch auxiliary GW3 payloads (charging status/limit).
+
+        The two paths come from the published client's constants
+        (``VEHICLECHARGINGSTATUS_URL`` / ``CHARGING_LIMIT_URL``).  The ones this
+        integration used before were guesses and never returned anything —
+        ``ms-vehicle-status`` only answers the ``/qrvs`` route, and the SOC limit
+        lives under ``ms-charge-manage``.
+        """
         extras: dict[str, Any] = {}
         for key, path, params in (
-            ("chargingStatus", "/ms-vehicle-status/api/v1.0/vehicle/charging/status",
+            ("chargingStatus",
+             "/ms-vehicle-status/api/v1.0/vehicle/charging/status/qrvs",
              {"latest": "true"}),
-            ("chargingLimit", "/ms-vehicle-status/api/v1.0/vehicle/charging/limit",
+            ("chargingLimit",
+             "/ms-charge-manage/api/v1.0/charge/getLatestSoc",
              None),
         ):
             try:

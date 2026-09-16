@@ -221,6 +221,10 @@ def _client(body: dict = _OK):
     # Pretend the vehicle list is already known, so the auth calls can carry
     # X-VIN the way the official app does.
     client._vehicle_data[VIN] = {}
+    # The tspCode chain fires on the first 079001 and spends requests doing it.
+    # Every test about the *rest* of the plumbing marks it spent, so it cannot
+    # swallow the canned responses; the chain has tests of its own below.
+    client._platform_chain_done = True
     return client, session
 
 
@@ -453,6 +457,7 @@ def _command_client(responses):
     client._user_id = "uid-1"
     client._vehicle_data[VIN] = {}
     client._new_access_token = "gw3-token"
+    client._platform_chain_done = True
     return client, session
 
 
@@ -1020,3 +1025,89 @@ def test_the_preferred_gateway_is_not_marked_degraded():
 
     assert result["gateway"] == "gw3"
     assert "degraded" not in result
+
+
+# ---------------------------------------------------------------------------
+# The new-platform (tspCode) token chain
+# ---------------------------------------------------------------------------
+
+
+def _code_then_login(code: str = "TSP-CODE-1"):
+    return [
+        {"code": "000000", "msg": "ok", "data": {"code": code}},
+        {"code": "000000", "msg": "ok",
+         "data": {"accessToken": "platform-token"}},
+    ]
+
+
+def test_tsp_code_chain_swaps_in_a_platform_token():
+    """``identifier`` + ``identityType: 10`` — not the JWT hand-off.
+
+    The vehicle interfaces only accept the token this second login mints; the
+    GW1 JWT that the legacy login forwards never reaches them.
+    """
+    client, session = _client(_code_then_login())
+    client._platform_chain_done = False
+
+    assert asyncio.run(client._platform_token()) is True
+
+    code_call, login_call = session.calls
+    assert code_call["method"] == "GET"
+    assert "api-gw-toc.zeekrlife.com" in code_call["url"]
+    assert "/tspCode" in code_call["url"]
+    assert "tspClientId=" in code_call["url"]
+
+    assert login_call["method"] == "POST"
+    assert login_call["url"].endswith("/ms-user-auth/v1.0/auth/login")
+    sent = json.loads(_wire_body(login_call))
+    assert sent["identifier"] == "TSP-CODE-1"
+    assert sent["identityType"] == 10
+    assert "token" not in sent
+    assert "Authorization" not in login_call["headers"]
+
+    assert client._new_access_token == "platform-token"
+    summary = client.gateway_summary()
+    assert summary["gw3_token_source"] == "platform"
+    assert [step["step"] for step in summary["platform_chain"]] == [
+        "tspCode", "platformLogin",
+    ]
+    # Keys, never values — a login body can carry credentials.
+    assert "platform-token" not in json.dumps(summary)
+
+
+def test_a_forbidden_interface_raises_a_platform_token_and_retries():
+    client, session = _command_client([
+        {"code": "079001", "msg": "[SDK]此接口未被授权，无法访问!"},   # gw3 command
+        {"code": "000000", "data": {"code": "TSP-CODE-1"}},           # GW1 tspCode
+        {"code": "000000", "data": {"accessToken": "platform-token"}},  # platform login
+        {"code": "000000", "msg": "ok"},                              # retried command
+    ])
+    client._platform_chain_done = False
+
+    result = asyncio.run(
+        client.async_do_remote_control(VIN, "start", "ZAF", AC_SETTING)
+    )
+
+    assert result["gateway"] == "gw3"
+    # It was retried with the new token rather than falling through to GW2.
+    assert "degraded" not in result
+    assert session.calls[-1]["headers"]["Authorization"] == "Bearer platform-token"
+    assert client.gateway_summary()["gw3_token_source"] == "platform"
+
+
+def test_the_platform_chain_is_attempted_only_once_per_process():
+    """It is a remedy, not a poll: the next 079001 must not re-run it."""
+    client, session = _client([
+        {"code": "079001", "msg": "[SDK]此接口未被授权，无法访问!"},
+    ])
+    client._platform_chain_done = False
+
+    path = "/ms-vehicle-status/api/v1.0/vehicle/status/latest"
+    asyncio.run(client._gw3("GET", path, vin=VIN, token="gw3-token"))
+
+    assert client.gateway_summary()["platform_chain"]     # it ran, and recorded it
+    assert client.gateway_summary()["gw3_token_source"] == "legacy"
+
+    before = len(session.calls)
+    asyncio.run(client._gw3("GET", path, vin=VIN, token="gw3-token", retry=False))
+    assert len(session.calls) - before == 1               # one plain request only
