@@ -466,6 +466,150 @@ def cmd_gw2cmd(args: argparse.Namespace) -> int:
     return asyncio.run(_gw2cmd(client, args))
 
 
+def _climate_flag(payload: Any) -> Any:
+    """Dig the AC indicator out of a GW2 status payload."""
+    stack = [payload]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in ("preClimateActive", "airBlowerActive"):
+                    return f"{key}={value}"
+                stack.append(value)
+        elif isinstance(node, list):
+            stack.extend(node)
+    return None
+
+
+async def _act(client, args) -> int:
+    """Send one command and watch the car, so the verdict is the car's.
+
+    The gateway answers ``1000 操作成功`` for a nonsense body just as happily
+    as for a real one, so its reply says nothing.  The only trustworthy signal
+    is whether the reported climate state actually moves afterwards.
+    """
+    await client.async_get_vehicle_list()
+    vin = client._first_known_vin()
+    if not vin:
+        print("没有 VIN")
+        return 1
+
+    path = f"/remote-control/vehicle/telematics/{vin}"
+    params = []
+    for item in (args.param or []):
+        if "=" in item:
+            key, _, value = item.partition("=")
+            params.append({"key": key, "value": value})
+
+    body: dict[str, Any] = {
+        "command": args.cmd,
+        "creator": "tc",
+        "serviceId": args.service,
+        "serviceParameters": params,
+        "timestamp": str(int(time.time() * 1000)),
+    }
+    if client._user_id:
+        body["userId"] = client._user_id
+    if args.duration is not None:
+        body["operationScheduling"] = {
+            "duration": int(args.duration), "interval": 0,
+            "occurs": 1, "recurrentOperation": False,
+        }
+
+    before = _climate_flag(await client.get_vehicle_status_gw2(vin))
+    print(f"  下发前 preClimateActive: {before}")
+
+    result = await client._gw2("PUT", path, payload=body)
+    info = brief(result)
+    print(f"  指令 → {info.get('code')} {info.get('msg') or ''}")
+
+    if args.wait > 0:
+        print(f"  等待 {args.wait}s 让车端上报…")
+        await asyncio.sleep(args.wait)
+        after = _climate_flag(await client.get_vehicle_status_gw2(vin))
+        print(f"  下发后 preClimateActive: {after}")
+        print("  ⇒ " + ("车端状态**变了**" if after != before
+                        else "车端状态**没变** —— 指令没被执行"))
+    return 0
+
+
+# The gateway never validates parameters — it answers ``1000 操作成功`` for an
+# empty body as happily as for a real one — so its reply cannot rank these.
+# They are judged only by whether the car moves.  The app asks for a
+# temperature and a run time, so every variant carries both; what differs is
+# how they are *named* and whether the time is a parameter or a window.
+_AC_VARIANTS = (
+    ("ZAF", [{"key": "AC", "value": "true"},
+             {"key": "AC.temp", "value": "22.0"},
+             {"key": "AC.duration", "value": "15"}], None),
+    ("ZAF", [{"key": "AC", "value": "true"},
+             {"key": "AC.temp", "value": "22"},
+             {"key": "AC.duration", "value": "15"}], None),
+    ("ZAF", [{"key": "AC", "value": "true"},
+             {"key": "temp", "value": "22.0"},
+             {"key": "duration", "value": "15"}], None),
+    ("ZAF", [{"key": "AC", "value": "true"},
+             {"key": "AC.temp", "value": "22.0"}], 900),
+    ("RCE_2", [{"key": "rce.conditioner", "value": "start"},
+               {"key": "rce.temp", "value": "22"},
+               {"key": "rce.duration", "value": "15"}], None),
+)
+
+
+async def _batch(client, args) -> int:
+    await client.async_get_vehicle_list()
+    vin = client._first_known_vin()
+    if not vin:
+        print("没有 VIN")
+        return 1
+    path = f"/remote-control/vehicle/telematics/{vin}"
+    before = _climate_flag(await client.get_vehicle_status_gw2(vin))
+    print(f"  下发前: {before}")
+
+    for index, (service, params, duration) in enumerate(_AC_VARIANTS, 1):
+        body: dict[str, Any] = {
+            "command": "start", "creator": "tc", "serviceId": service,
+            "serviceParameters": params,
+            "timestamp": str(int(time.time() * 1000)),
+        }
+        if client._user_id:
+            body["userId"] = client._user_id
+        if duration is not None:
+            body["operationScheduling"] = {
+                "duration": duration, "interval": 0,
+                "occurs": 1, "recurrentOperation": False,
+            }
+        try:
+            result = await client._gw2("PUT", path, payload=body)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  {index}. {service} {params} → {type(exc).__name__}: {exc}"[:110])
+            continue
+        info = brief(result)
+        keys = [p["key"] for p in params]
+        print(f"  {index}. {service} {keys}"
+              f"{'+window' if duration else ''} → {info.get('code')} "
+              f"{info.get('msg') or ''}")
+        await asyncio.sleep(6)
+
+    print(f"  等待 {args.wait}s 让车端上报…")
+    await asyncio.sleep(args.wait)
+    after = _climate_flag(await client.get_vehicle_status_gw2(vin))
+    print(f"  下发后: {after}")
+    print("  ⇒ " + ("车端状态**变了**" if after != before
+                    else "车端状态**没变**（也可能车端上报有延迟，请看车/App）"))
+    return 0
+
+
+def cmd_batch(args: argparse.Namespace) -> int:
+    client, _ = build_client(args)
+    return asyncio.run(_batch(client, args))
+
+
+def cmd_act(args: argparse.Namespace) -> int:
+    client, _ = build_client(args)
+    return asyncio.run(_act(client, args))
+
+
 def cmd_sms_request(args: argparse.Namespace) -> int:
     client, _ = build_client(args)
     result = asyncio.run(client.async_send_sms(args.phone))
@@ -918,6 +1062,8 @@ COMMANDS = {
     "lab": (cmd_lab, "令牌实验：哪条登录能拿到带 scope 的令牌"),
     "scan": (cmd_scan, "扫描可能换出 TSP 令牌的路由"),
     "gw2cmd": (cmd_gw2cmd, "GW2 控制通道是否真的校验 serviceId"),
+    "act": (cmd_act, "下发指令并观察车端状态是否真的变化"),
+    "batch": (cmd_batch, "连发多组空调参数变体并观察车端"),
     "summary": (cmd_summary, "查看本地持有的凭据（不发请求）"),
     "bootstrap": (cmd_bootstrap, "恢复会话 + 车辆列表 + 取 GW3 令牌"),
     "status": (cmd_status, "拉取并解析车辆状态"),
@@ -951,6 +1097,19 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("lab", help="哪条登录能拿到带 scope 的令牌")
     sub.add_parser("scan", help="扫描两个网关上可能换出 TSP 令牌的路由")
     sub.add_parser("gw2cmd", help="探测 GW2 控制通道是否真的校验 serviceId")
+
+    p_act = sub.add_parser("act", help="下发一条指令并观察车端状态是否真的变化")
+    p_act.add_argument("--service", default="ZAF")
+    p_act.add_argument("--cmd", default="start", dest="cmd")
+    p_act.add_argument("--param", action="append",
+                       help="key=value，可重复")
+    p_act.add_argument("--duration", type=int,
+                       help="写入 operationScheduling.duration")
+    p_act.add_argument("--wait", type=int, default=35,
+                       help="下发后等待多少秒再读车端状态")
+
+    p_batch = sub.add_parser("batch", help="连发多组参数变体，再看车端是否响应")
+    p_batch.add_argument("--wait", type=int, default=50)
 
     p_status = sub.add_parser("status")
     p_status.add_argument("vin", nargs="?")
