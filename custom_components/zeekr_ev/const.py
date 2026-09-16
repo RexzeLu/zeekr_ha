@@ -49,7 +49,12 @@ DEFAULT_LOGIN_DEVICE_ID = "Android-Android SDK built for arm64-26-8.0.0"
 # fresh ``snc_login`` instead of silently reusing a session the gateway built
 # from the old request — without it, a fix like the device id above would never
 # take effect until the token happened to expire.
-CREDENTIAL_REVISION = 2
+#
+# Rev 3: no request change — it exists to *observe* one successful login
+# response.  The diagnostics had only ever captured failed logins, so the field
+# structure of a successful one (the only place the platform could hand out a
+# per-vehicle token) was unknown.
+CREDENTIAL_REVISION = 3
 
 DRIVE_SIDE_LHD = "lhd"
 DRIVE_SIDE_RHD = "rhd"

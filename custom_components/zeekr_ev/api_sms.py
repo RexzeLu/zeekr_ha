@@ -132,11 +132,44 @@ class ZeekrApiError(ZeekrError):
     """Non-auth API failure (network, business rejection, ...)."""
 
 
+def _data_shape(value: Any, prefix: str = "", depth: int = 2,
+                limit: int = 60) -> list[str]:
+    """The *shape* of a response body: dotted key paths, never their values.
+
+    A successful GW3 login is the one response whose fields we cannot guess —
+    it is where a per-vehicle token would have to arrive, if the platform hands
+    one out at all.  Listing nested paths (``data.vehicle.encVin``) is what makes
+    that visible while keeping credentials out of the diagnostics file.
+    """
+    if depth <= 0:
+        return []
+    if isinstance(value, list):
+        first = next(
+            (item for item in value if isinstance(item, (dict, list))), None
+        )
+        # A list is a container, not a level of nesting: descending into it must
+        # not spend budget, or ``{"list": [{...}]}`` comes back as just "list".
+        return _data_shape(first, prefix + "[0].", depth, limit)
+    if not isinstance(value, dict):
+        return []
+    paths: list[str] = []
+    for key in sorted(value):
+        item = value[key]
+        path = f"{prefix}{key}"
+        paths.append(path)
+        if isinstance(item, (dict, list)):
+            paths.extend(_data_shape(item, path + ".", depth - 1, limit))
+        if len(paths) >= limit:
+            break
+    return paths[:limit]
+
+
 def _response_brief(result: Any) -> dict[str, Any]:
     """Summarise a gateway response without leaking credentials.
 
-    Tokens are only ever reported as *which fields the backend answered with*,
-    which is what makes a silent GW3 login failure debuggable.
+    Tokens are only ever reported as *which fields the backend answered with*
+    (and how those fields nest), which is what makes a silent GW3 login failure
+    debuggable.
     """
     if not isinstance(result, dict):
         return {"code": None, "msg": str(result)[:200], "data_keys": None}
@@ -144,7 +177,7 @@ def _response_brief(result: Any) -> dict[str, Any]:
     return {
         "code": result.get("code"),
         "msg": result.get("msg") or result.get("message"),
-        "data_keys": sorted(data) if isinstance(data, dict) else None,
+        "data_keys": _data_shape(data) if data is not None else None,
     }
 
 
@@ -348,9 +381,11 @@ class ZeekrSmsApiClient:
         # Every X-VIN encoding tried, with the gateway's verdict — this is what
         # settles the question when a dump comes back.
         self._gw3_vin_attempts: list[dict[str, Any]] = []
-        # Opaque per-vehicle ``X-VIN`` token supplied by the owner (None = derive
-        # it locally by encrypting the VIN).
+        # Opaque per-vehicle ``X-VIN`` token (None = derive it locally by
+        # encrypting the VIN), and where it came from ("configured" or
+        # "backend:<field>") — diagnostics only, never the value itself.
         self._vehicle_token: str | None = None
+        self._vehicle_token_source: str | None = None
 
     # -- token persistence ------------------------------------------------
 
@@ -362,6 +397,7 @@ class ZeekrSmsApiClient:
         """Use the app's own ``X-VIN`` value instead of a locally derived one."""
         token = (token or "").strip()
         self._vehicle_token = token or None
+        self._vehicle_token_source = "configured" if token else None
 
     def store_tokens(self, data: dict[str, Any]) -> None:
         """Load persisted tokens / identifiers from a config entry."""
@@ -446,8 +482,10 @@ class ZeekrSmsApiClient:
             "gw3_last_rejected": self._gw3_last_rejected,
             "command_attempts": list(self._command_attempts),
             "gw3_vin_encrypted": self._gw3_vin_encrypted,
-            # Only whether it is set — the token itself is a capability secret.
+            # Only whether it is set (and where it came from) — the token itself
+            # is a capability secret.
             "vehicle_token_configured": bool(self._vehicle_token),
+            "vehicle_token_source": self._vehicle_token_source,
             "gw3_vin_attempts": list(self._gw3_vin_attempts),
             # The device profile the session was created with.  Not a secret
             # (it is a synthetic brand/model/sdk/release string) and the single
@@ -970,8 +1008,48 @@ class ZeekrSmsApiClient:
         )
         self._gw3_available = True
         self._gw3_login_error = None
+        self._absorb_vehicle_token(data)
         _LOGGER.debug("GW3 %s 成功", what)
         return True
+
+    # Field names a per-vehicle X-VIN token could plausibly arrive under.  The
+    # platform may hand one out at login instead of expecting the client to
+    # derive it from the VIN; if so, using it beats anything we can compute.
+    _VEHICLE_TOKEN_KEYS = (
+        "encVin", "encryptedVin", "encryptionVin", "xVin", "xVinToken",
+        "vehicleToken", "vinToken", "secVin",
+    )
+
+    def _absorb_vehicle_token(self, data: Any, depth: int = 2) -> bool:
+        """Adopt a per-vehicle ``X-VIN`` token if the backend sent one.
+
+        A guess at field names, but a cheap one: the value is only ever used as
+        the ``X-VIN`` header, so a miss just means we keep deriving it locally,
+        and a hit would explain why a locally derived VIN is turned down.
+        """
+        if depth <= 0 or self._vehicle_token:
+            return False
+        if isinstance(data, dict):
+            for key in self._VEHICLE_TOKEN_KEYS:
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    self._vehicle_token = value.strip()
+                    self._vehicle_token_source = f"backend:{key}"
+                    _LOGGER.info(
+                        "GW3 登录响应里带有车辆令牌（字段 %s），改用该值作为 X-VIN",
+                        key,
+                    )
+                    return True
+            return any(
+                self._absorb_vehicle_token(item, depth - 1)
+                for item in data.values() if isinstance(item, (dict, list))
+            )
+        if isinstance(data, list):
+            return any(
+                self._absorb_vehicle_token(item, depth - 1)
+                for item in data if isinstance(item, (dict, list))
+            )
+        return False
 
     async def snc_login(self) -> dict[str, Any]:
         """Log into the SNCTSP (GW3) gateway with the GW1 JWT.

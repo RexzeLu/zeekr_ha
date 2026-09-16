@@ -818,3 +818,64 @@ def test_diagnostics_report_the_login_device_profile():
     summary = client.gateway_summary()
     assert summary["login_device_id"] == api_sms.DEFAULT_LOGIN_DEVICE_ID
     assert len(summary["login_device_id"].split("-")) >= 4
+
+
+# ---------------------------------------------------------------------------
+# Reading a successful login response
+# ---------------------------------------------------------------------------
+
+
+def test_response_brief_lists_nested_key_paths_without_values():
+    """A successful login's field structure is what we had never seen.
+
+    Diagnostics had only ever captured *failed* logins, so whether the platform
+    hands out a per-vehicle token at login was unknown.  Only key paths are
+    reported — the values can be credentials.
+    """
+    brief = api_sms._response_brief({
+        "code": "000000",
+        "data": {
+            "accessToken": "secret-value",
+            "vehicle": {"encVin": "another-secret", "vin": "VINSENTINEL"},
+        },
+    })
+
+    assert brief["data_keys"] == [
+        "accessToken", "vehicle", "vehicle.encVin", "vehicle.vin",
+    ]
+    blob = json.dumps(brief)
+    assert "secret-value" not in blob
+    assert "another-secret" not in blob
+    assert "VINSENTINEL" not in blob
+
+
+def test_response_brief_handles_lists_and_empty_bodies():
+    assert api_sms._response_brief({"code": "000000", "data": None})["data_keys"] is None
+    assert api_sms._response_brief({
+        "code": "000000", "data": {"list": [{"vin": "x", "name": "y"}]},
+    })["data_keys"] == ["list", "list.[0].name", "list.[0].vin"]
+
+
+def test_a_vehicle_token_from_the_backend_is_adopted():
+    """If the platform hands one out, deriving a VIN locally is pointless."""
+    client, _ = _client()
+
+    adopted = client._absorb_vehicle_token(
+        {"accessToken": "gw3-token", "vehicle": {"encVin": "backend-token"}}
+    )
+
+    assert adopted is True
+    summary = client.gateway_summary()
+    assert summary["vehicle_token_configured"] is True
+    assert summary["vehicle_token_source"] == "backend:encVin"
+    assert "backend-token" not in json.dumps(summary)
+
+
+def test_a_configured_token_is_not_overwritten_by_the_backend():
+    client, _ = _client()
+    client.set_vehicle_token("owner-supplied")
+
+    assert client._absorb_vehicle_token({"encVin": "backend-token"}) is False
+    summary = client.gateway_summary()
+    assert summary["vehicle_token_source"] == "configured"
+    assert "backend-token" not in json.dumps(summary)
