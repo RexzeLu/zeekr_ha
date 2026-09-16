@@ -921,28 +921,50 @@ class ZeekrSmsApiClient:
                 return vehicle.raw or {}
         return {}
 
-    def x_vin_candidates(self, vin: str) -> list[tuple[str, str]]:
-        """Values worth trying in the ``X-VIN`` header for this car.
+    @staticmethod
+    def _encrypt_ecb(plain: str) -> str:
+        """AES-128-ECB variant, in case the platform uses no chaining mode."""
+        cipher = AES.new(_AES_KEY.encode(), AES.MODE_ECB)
+        return _b64(cipher.encrypt(pad(plain.encode(), AES.block_size)))
 
-        The app AES-encrypts the VIN, which is what we send — but this account
-        does **not** own the car (``isOwner: false``), and for a shared vehicle
-        the relation that grants access is ``userVehId``, not the VIN itself.
-        Rather than guess which input the gateway wants, list the plausible ones
-        and let :meth:`probe_endpoints` show which is accepted.
+    @staticmethod
+    def _encrypt_zero_iv(plain: str) -> str:
+        """AES-128-CBC with a zero IV, in case the IV constant is wrong."""
+        cipher = AES.new(_AES_KEY.encode(), AES.MODE_CBC, b"\x00" * AES.block_size)
+        return _b64(cipher.encrypt(pad(plain.encode(), AES.block_size)))
+
+    def x_vin_candidates(self, vin: str) -> list[tuple[str, str, bool]]:
+        """``(label, value, adopt)`` triples worth trying in ``X-VIN``.
+
+        The gateway told us the header must be **at least 17 characters** (the
+        length of a VIN) and that the plain VIN is not accepted — so ``X-VIN``
+        is a VIN ciphertext.  What is *not* settled is whether our ``079001``
+        means "decrypted fine, but this account may not use this car" or "wrong
+        key, so it decrypted to garbage and no car matched".  A control entry of
+        valid-looking ciphertext that cannot possibly decrypt correctly tells
+        the two apart, and the remaining entries cover the plausible crypto
+        variants.
+
+        ``adopt`` is False for the control: it must never be latched onto.
         """
-        candidates: list[tuple[str, str]] = [("aes(vin)", self._encrypt_vin(vin))]
+        candidates: list[tuple[str, str, bool]] = [
+            ("aes(vin)", self._encrypt_vin(vin), True),
+            ("aes-ecb(vin)", self._encrypt_ecb(vin), True),
+            ("aes-zeroiv(vin)", self._encrypt_zero_iv(vin), True),
+        ]
         raw = self._vehicle_raw(vin)
         user_veh_id = raw.get("userVehId")
         if user_veh_id:
             candidates.append(
-                ("aes(userVehId)", self._encrypt_vin(str(user_veh_id)))
+                ("aes(userVehId)", self._encrypt_vin(str(user_veh_id)), True)
             )
-            candidates.append(("userVehId", str(user_veh_id)))
+            candidates.append(("userVehId", str(user_veh_id), False))
         tem_id = raw.get("temId")
         if tem_id:
-            candidates.append(("aes(temId)", self._encrypt_vin(str(tem_id))))
-        # Known to fail (nothing to decrypt), kept as a control in the report.
-        candidates.append(("vin", vin))
+            candidates.append(("aes(temId)", self._encrypt_vin(str(tem_id)), True))
+        # Controls — known-bad shapes, kept so the report shows the boundary.
+        candidates.append(("vin", vin, False))
+        candidates.append(("control:zero-ciphertext", _b64(b"\x00" * 32), False))
         return candidates
 
     async def _probe_x_vin(self, label: str, value: str) -> dict[str, Any]:
@@ -1022,11 +1044,12 @@ class ZeekrSmsApiClient:
             self._gw3_vin_attempts = saved_attempts
 
         candidates: list[dict[str, Any]] = []
-        for label, value in self.x_vin_candidates(vin):
+        for label, value, adopt in self.x_vin_candidates(vin):
             outcome = await self._probe_x_vin(label, value)
+            outcome["adoptable"] = adopt
             candidates.append(outcome)
             if outcome.get("code") == _SUCCESS:
-                if not self._vehicle_token:
+                if adopt and not self._vehicle_token:
                     self.set_vehicle_token(value)
                     self._vehicle_token_source = f"probe:{label}"
                     _LOGGER.warning(

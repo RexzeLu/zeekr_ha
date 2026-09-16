@@ -207,7 +207,11 @@ def _fake_encrypt_vin(vin: str) -> str:
     return f"ENC({vin})"
 
 
+# All three cipher variants are stubbed: the tests care about *which* value goes
+# into the header and in what order, not about AES itself.
 api_sms.ZeekrSmsApiClient._encrypt_vin = staticmethod(_fake_encrypt_vin)
+api_sms.ZeekrSmsApiClient._encrypt_ecb = staticmethod(lambda vin: f"ECB({vin})")
+api_sms.ZeekrSmsApiClient._encrypt_zero_iv = staticmethod(lambda vin: f"ZIV({vin})")
 
 
 def _client(body: dict = _OK):
@@ -893,13 +897,15 @@ def test_endpoint_probe_maps_the_boundary_and_leaves_no_trace():
     restoring the request-shape records it would overwrite the very failure a
     diagnostics dump exists to show.
     """
+    denied = {"code": "079001", "msg": "[SDK]此接口未被授权，无法访问!"}
     client, session = _client([
-        {"code": "079001", "msg": "seed"},                      # seeded traffic
-        {"code": "000000", "data": {"list": []}},               # path: vehicle list
-        {"code": "079001", "msg": "[SDK]此接口未被授权，无法访问!"},  # path: state
-        {"code": "079001", "msg": "[SDK]此接口未被授权，无法访问!"},  # path: status
-        {"code": "079001", "msg": "[SDK]此接口未被授权，无法访问!"},  # cand: aes(vin)
-        {"code": "079001", "msg": "[SDK]此接口未被授权，无法访问!"},  # cand: vin
+        {"code": "079001", "msg": "seed"},          # seeded traffic
+        {"code": "000000", "data": {"list": []}},   # path: vehicle list (works)
+        denied,                                     # path: getVehicleState
+        denied,                                     # path: status
+        denied, denied, denied,                     # candidates: aes* variants
+        {"code": "079025", "msg": "Decrypt X-VIN failed."},   # candidate: vin
+        denied,                                     # control: zero ciphertext
     ])
     asyncio.run(client._gw3(
         "GET", "/ms-vehicle-status/api/v1.0/vehicle/status/latest",
@@ -919,7 +925,16 @@ def test_endpoint_probe_maps_the_boundary_and_leaves_no_trace():
     assert paths[0]["with_x_vin"] is False       # the one path that works …
     assert paths[1]["with_x_vin"] is True        # … versus an X-VIN one
     assert paths[1]["code"] == "079001"
-    assert [c["label"] for c in probe["x_vin_candidates"]] == ["aes(vin)", "vin"]
+
+    labels = [c["label"] for c in probe["x_vin_candidates"]]
+    assert labels[0] == "aes(vin)"
+    assert "control:zero-ciphertext" in labels
+    # The control is present precisely so the report can be read: if only it
+    # answers 079025 while the real ciphertext answers 079001, the gateway does
+    # check the plaintext and our key is fine.
+    control = next(c for c in probe["x_vin_candidates"]
+                   if c["label"] == "control:zero-ciphertext")
+    assert control["adoptable"] is False
 
     after = client.gateway_summary()
     assert after["gw3_last_rejected"] == before["gw3_last_rejected"]
@@ -953,8 +968,18 @@ def test_x_vin_candidates_include_the_shared_car_relation():
         VIN, {"vin": VIN}, {"userVehId": 100097022, "temId": "V8986"},
     )]
 
-    labels = [label for label, _ in client.x_vin_candidates(VIN)]
+    candidates = client.x_vin_candidates(VIN)
+    labels = [label for label, _, _ in candidates]
 
     assert labels == [
-        "aes(vin)", "aes(userVehId)", "userVehId", "aes(temId)", "vin",
+        "aes(vin)", "aes-ecb(vin)", "aes-zeroiv(vin)",
+        "aes(userVehId)", "userVehId", "aes(temId)",
+        "vin", "control:zero-ciphertext",
     ]
+    # Controls and known-bad shapes must never be latched onto, even if one
+    # happened to be accepted.
+    adoptable = {label: adopt for label, _, adopt in candidates}
+    assert adoptable["aes(vin)"] is True
+    assert adoptable["vin"] is False
+    assert adoptable["control:zero-ciphertext"] is False
+    assert adoptable["userVehId"] is False
