@@ -41,7 +41,16 @@ CONF_VEHICLE_TOKEN = "vehicle_token"
 # (``google-sdk_gphone64_x86_64-36-16``) and works, so the *shape* is what
 # matters, not the device's authenticity.  This one is verbatim from the
 # captured app traffic.
-DEFAULT_LOGIN_DEVICE_ID = "Android-Android SDK built for arm64-26-8.0.0"
+# The device profile the captured app used, kept in one place: GW1 sends the
+# model and SDK as headers while GW3 sends brand-model-sdk-release as
+# ``loginDeviceId``, and the two must describe the same device.
+DEVICE_BRAND = "Android"
+DEVICE_MODEL = "Android SDK built for arm64"
+DEVICE_SDK = "26"
+DEVICE_OS_RELEASE = "8.0.0"
+DEFAULT_LOGIN_DEVICE_ID = (
+    f"{DEVICE_BRAND}-{DEVICE_MODEL}-{DEVICE_SDK}-{DEVICE_OS_RELEASE}"
+)
 
 # Bumped whenever the shape of the login request changes in a way that should
 # invalidate tokens minted by an older build.  ``store_tokens`` drops the stored
@@ -54,7 +63,13 @@ DEFAULT_LOGIN_DEVICE_ID = "Android-Android SDK built for arm64-26-8.0.0"
 # response.  The diagnostics had only ever captured failed logins, so the field
 # structure of a successful one (the only place the platform could hand out a
 # per-vehicle token) was unknown.
-CREDENTIAL_REVISION = 3
+#
+# Rev 4: the client identity changed — GW1 now asks as the Android app the
+# capture shows instead of an iOS client, and the App version tracks the real
+# App (5.0.5) rather than the eight-month-old captured value.  A token minted
+# under the old identity would keep the old answer alive until it expired, so
+# the stored one is dropped and minted again.
+CREDENTIAL_REVISION = 4
 
 DRIVE_SIDE_LHD = "lhd"
 DRIVE_SIDE_RHD = "rhd"

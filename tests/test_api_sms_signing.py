@@ -370,7 +370,11 @@ def test_gw3_headers_match_the_official_app():
     assert headers["X-PROJECT-ID"] == "ZEEKR"
     assert headers["X-PLATFORM"] == "APP"
     assert headers["Accept-Language"] == "en-US"
-    assert headers["X-APP-OS-VERSION"] == "4.9.28"
+    # Deliberately NOT the captured 4.9.28: the App is on 5.0.5 now, and a
+    # gateway that only exposes an interface from a minimum client version
+    # onwards reads exactly this field to decide.
+    assert headers["X-APP-OS-VERSION"] == api_sms._GW3_APP_VERSION
+    assert headers["X-APP-OS-VERSION"] != "4.9.28"
     assert headers["X-P"] == "Android"
     assert headers["User-Agent"] == "okhttp/4.12.0"
     # A plain dashed UUID, as the app sends it.
@@ -1176,3 +1180,34 @@ def test_tsp_code_probe_records_the_host_and_the_error_body_shape():
     # A proxy/Spring error body has no code/msg of ours — record its shape so
     # "route missing" is distinguishable from "we were refused".
     assert attempts[0]["top_keys"] == ["error", "status", "timestamp"]
+
+
+def test_gw1_asks_as_the_android_client_the_capture_used():
+    """GW1 picks the service from the client identity, so the iOS costume had to go.
+
+    The captured app is Android on **both** gateways, yet this integration asked
+    GW1 as ``toc_ios_zeekrapp`` (app_version 4.0.2, an iPhone UA) on a grey
+    channel — and a route that is not served to that client answers 404 rather
+    than "refused", which is exactly what the ``tspCode`` probes returned.
+    ``x_gray_code`` is sent empty because the app sends it empty: a grey channel
+    is a feature-flag bucket, not a licence to use every interface.
+    """
+    client, session = _client()
+    client._device_id = "DEV-1"
+
+    asyncio.run(client.async_send_sms("13800000000"))
+
+    headers = session.calls[0]["headers"]
+    assert headers["app_code"] == "toc_android_zeekrapp"
+    assert headers["app_type"] == "android"
+    assert headers["platform"] == "ANDROID"
+    assert headers["app_version"] == api_sms._GW3_APP_VERSION
+    assert headers["phone_model"] == api_sms.DEVICE_MODEL
+    assert headers["phone_version"] == api_sms.DEVICE_SDK
+    assert headers["x_gray_code"] == ""
+    assert headers["User-Agent"] == "okhttp/4.12.0"
+    assert "iPhone" not in json.dumps(headers)
+    # The signing headers are untouched — GW1 still authenticates the same way.
+    assert headers["x_ca_sign"]
+    assert headers["x_ca_key"] == "APP-SIGN-SECRET-KEY"
+    assert headers["device_id"] == "DEV-1"

@@ -40,6 +40,8 @@ from .const import (
     CONF_PHONE,
     CREDENTIAL_REVISION,
     DEFAULT_LOGIN_DEVICE_ID,
+    DEVICE_MODEL,
+    DEVICE_SDK,
     STORAGE_ACCESS_TOKEN,
     STORAGE_CLIENT_ID,
     STORAGE_CREDENTIAL_REVISION,
@@ -69,6 +71,15 @@ _AES_IV = "ed446b8b8845013d"
 
 _GW1_HOST = "api-gw-toc.zeekrlife.com"
 _GW1_BASE = f"https://{_GW1_HOST}"
+
+# The app version every GW3 request claims to come from.  It mirrors a captured
+# request (``4.9.28``, 2026-01) — but that capture is eight months old and the
+# owner's App is now ``5.0.5``.  Gateways commonly expose interfaces only from a
+# minimum client version onwards, and this is the one field that says which
+# client we are, so it is kept in step with the real App rather than frozen at
+# the captured value.  (The signature version actually used is unchanged; see
+# ``_LOGIN_VARIANTS`` for the combinations worth trying.)
+_GW3_APP_VERSION = "5.0.5"
 _GW2_BASE = "https://api.zeekrline.com"
 _GW3_BASE = "https://snc-tsp-api.zeekrlife.com"
 
@@ -561,29 +572,39 @@ class ZeekrSmsApiClient:
         ).hexdigest()
 
     def _gw1_headers(self) -> dict[str, str]:
+        """The client identity GW1 routes on — the captured **Android** app.
+
+        This used to claim the iOS client (``toc_ios_zeekrapp``, ``app_version``
+        4.0.2, an iPhone UA) and a grey-release channel (``x_gray_code:
+        gray74``).  The captured app traffic is Android on both gateways, and
+        GW1 selects the service — and therefore which routes exist — from
+        ``app_code``/``app_type``/``platform``.  Asking as the wrong client is
+        how a route ends up 404 rather than refused, which is exactly what the
+        ``tspCode`` probes answered.  ``x_gray_code`` is sent **empty**, as the
+        app sends it: a grey channel is a feature-flag bucket, not a licence to
+        use every interface.
+        """
         ts = _ts()
         nonce = _nonce()
         return {
-            "User-Agent": (
-                f"ZeekrLife/4.0.2 (iPhone; iOS 17.4.1; Scale/3.00){self._device_id}"
-            ),
+            "User-Agent": "okhttp/4.12.0",
             "request-original": "zeekr-app",
             "Accept-Language": "zh-Hans-CN;q=1, en-CN;q=0.9",
-            "Content-Type": "application/json",
-            "Accept": "*/*",
+            "Accept-Encoding": "gzip",
+            "Content-Type": "application/json; charset=UTF-8",
+            "app_code": "toc_android_zeekrapp",
+            "app_type": "android",
+            "app_version": _GW3_APP_VERSION,
+            "platform": "ANDROID",
+            "phone_model": DEVICE_MODEL,
+            "phone_version": DEVICE_SDK,
+            "workspaceId": "prod",
+            "x_gray_code": "",
             "x_ca_secret": _CA_SECRET,
-            "Version": "2",
-            "WorkspaceId": "prod",
             "x_ca_key": "APP-SIGN-SECRET-KEY",
-            "app_type": "IOS",
-            "app_version": "4.0.2",
-            "phone_model": "iPhone13",
-            "phone_version": "17.4.1",
-            "x_gray_code": "gray74",
             "x_ca_timestamp": ts,
             "x_ca_nonce": str(nonce),
             "x_ca_sign": self._sign_gw1(ts, nonce),
-            "app_code": "toc_ios_zeekrapp",
             "device_id": self._device_id,
             "Authorization": self._jwt_token or "",
         }
@@ -717,7 +738,7 @@ class ZeekrSmsApiClient:
             "X-PROJECT-ID": "ZEEKR",
             "X-P": "Android",
             "X-DEVICE-ID": self._device_id,
-            "X-APP-OS-VERSION": "4.9.28",
+            "X-APP-OS-VERSION": _GW3_APP_VERSION,
             "X-PLATFORM": "APP",
             "X-API-SIGNATURE-NONCE": nonce,
             "User-Agent": "okhttp/4.12.0",

@@ -311,6 +311,14 @@
 每个旋钮的判定结果都会写进 `platform_chain`，所以**一份诊断就能看出哪个方向有效**，
 不用反复试。
 
+> **客户端身份（0.3.23 起）**：GW1 与 GW3 都以**Android 客户端**身份请求，
+> 与抓包里的 App 一致（此前 GW1 一直冒充 iOS：`toc_ios_zeekrapp`、
+> `app_version 4.0.2`、iPhone 的 UA，并且带着灰度通道 `x_gray_code: gray74`）。
+> GW1 是**按 `app_code` / `app_type` / `platform` 选服务**的，用错客户端时
+> 不存在的路由会直接 404 —— 这可能正是 tspCode 探测全部 404 的原因。
+> 同时 `X-APP-OS-VERSION` / `app_version` 改为跟随**真实 App 版本**（当前 5.0.5），
+> 因为网关可能按「最低客户端版本」才开放新接口。
+
 **② 账号是否与 App 一致**
 
 网关判定「按车授权」依据的是**账号**。请确认：
