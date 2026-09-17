@@ -299,3 +299,162 @@ field_ids/class_defs）不在明文中**（已用「锚点 u32 反查」+「相�
   `rce.temp`，以及 **`rce.heat.{11,19,21,25,29,31,39}`**、
   **`rce.ventilation.{11,19,21,25,29,31,39}`** —— 数字后缀像是温度/档位枚举，
   用法待定（可能是 `rce.heat` 的取值集合，也可能是组合键）。
+
+---
+
+# 2026-09-18 深夜：GW3 微服务地图 + 「SDK 门禁」真相 + 车辆分享业务域
+
+## 一句话结论
+
+**`079001` 的真相是「SDK 级接口」门禁 —— 卡的是客户端/令牌身份，不是参数。**
+同一份 GW3 令牌下，同一服务的「控制类」接口被拒、「查询类」接口放行。
+⇒ **GW2 侧继续猜 `serviceParameters` 参数是死路，可正式停止。**
+
+## 实测矩阵（令牌：`azp=aud=user_center_client_phone`、`scope=""`）
+
+| 接口 | 结果 | 判定 |
+| --- | --- | --- |
+| `POST /ms-remote-control/v1.0/remoteControl/control` | `079001 [SDK]此接口未被授权，无法访问!` | SDK 门禁 |
+| `GET /ms-vehicle-status/api/v2.0/vehicle/status/latest` | 同上 | SDK 门禁 |
+| `ms-vehicle-status/.../qrvs`、`/vtm`、`/widget` | 同上 | SDK 门禁 |
+| `GET /ms-tsp-user-vehicle/.../vehicle-shares/services`、`/check-share` | 同上 | SDK 门禁 |
+| `GET /ms-remote-control/v1.0/remoteControl/queryProcessResult` | `000002` sessionId 缺失 | **可用（闭环结果查询！）** |
+| `GET ms-tsp-user-vehicle/.../vehicle-shares/{owner/share-list, owner/share-histories, share/accept-list, share/accept-histories}` | `000000 ok`（total=0） | **可用** |
+| `POST .../vehicle-shares/{owner/share, update-auth, cancel, share/accept}` | `000002` 分享类型/分享主键不可为空 | 网关放行，参数级校验 |
+| `GET /ms-user-auth/api/v1.0/auth/cloud/temp/code` | `000000 ok` | **可用** |
+| `POST /ms-user-auth/v1.0/auth/login` | `000000 ok` → 令牌 1047 字符 | 我们现用登录 |
+
+要点：同一服务内「控制被拒 / 查询放行」⇒ 门禁按**接口粒度**（很可能看令牌 azp/scope 或客户端身份），
+与 `X-VIN`、`serviceParameters` 无关。
+
+## GW3 令牌声明（实测解码）
+
+```
+iss   = https://snc-api-gw-inner.zeekrlife.com/auth-service/inner/v1/oauth/info
+aud   = azp = user_center_client_phone     <- 用户中心「手机号登录」客户端
+scope = ""                                  <- 空
+sub   = openId = 2068684429979209728
+userId= 403215671   sid = <uuid>   RS256 / 1047 字符   exp 7 天
+```
+
+## 微服务地图（dex 全量枚举 55 个前缀）
+
+```
+zeekrlife-bbs-theme(158) zeekrlife-mp-order(92) zeekrlife-mp-integral(64)
+zeekrlife-app-user(60)   ms-tsp-dkbs-geely(54)  zeekrlife-config-order(26)
+ms-tsp-user-vehicle(21)  ms-charge-manage(15)   zeekrlife-mp-mps(13)  ms-user-auth(13)
+scenario-personalization(12) ms-remote-control(11) zeekrlife-mp-cmall(10)
+map-d2d-auto-service(10) ms-app-bff(9)  ms-tsp-bks-geely(9)  ms-midground-user(6)
+ms-vehicle-status(6)     sentinel-monitoring-service(6) zeekrlife-mp-account(6)
+zeekrlife-mp-mkt(6)      zeekrlife-dod-search(5) ms-vehicle-defence(5) ms-vehicle-trail(5)
+ms-vehicle-core(5)       zeekrlife-mp-sic(5)    ms-iot-device(4) zeekrlife-mp-sconfig(4)
+zeekrlife-mp-auth2(3)    zeekrlife-pricing-order(3) zeekr-ud-ota(3) zeekrlife-mp-achieve(3)
+ms-tsp-user-setting(2)   ms-user-manager(2)     snc-remote-config(2) file-service(2)
+ms-iot-control(2)        scenario-mate-management-service(2) zeekrlife-mp-osp(2)
+journey-statistics-service(1) ms-app-online-center(1) map-service(1) ms-lbs-service(1)
+ms-vehicle-guard(1)      ms-ai-cloud(1) ms-app-message-center(1) ms-vehicle-account(1)
+ms-vehicle-extend(1)     appconfig(1) ms-iot-status(1) ms-log(1) zeekrlife-mp-store(1)
+```
+
+### 控制相关服务的完整路由（dex 原文）
+
+```
+# ms-remote-control（10）
+/ms-remote-control/api/v1.0/remoteControl/aiClimate        <- 注意带 /api/
+/ms-remote-control/api/v1.0/remoteControl/control
+/ms-remote-control/api/v1.0/remoteControl/getOxygenSupply
+/ms-remote-control/api/v1.0/remoteControl/queryAiClimate
+/ms-remote-control/api/v1.0/remoteControl/queryProcessResult   <- 闭环结果查询（实测可用）
+/ms-remote-control/api/v1.0/remoteControl/setOxygenSupply
+/ms-remote-control/api/v1.0/remoteControl/setSmartTemp
+/ms-remote-control/api/v1.0/remoteControl/temperature/{del,get,save}/pattern
+
+# ms-vehicle-status（6）
+/ms-vehicle-status/api/v1.0/vehicle/status/{carFridge,powerMode,qrvs,vtm}
+/ms-vehicle-status/api/v2.0/vehicle/status/{latest,widget}
+
+# ms-iot-control（2）  <- GW1/GW2/GW3 均 404，宿主未知
+/ms-iot-control/api/v1.0/iotControl/downLink
+/ms-iot-control/api/v1.0/iotControl/queryProcessResult
+
+# ms-iot-device（4）   /ms-vehicle-core（5，GW1/GW3 均 404）
+/ms-iot-device/api/v1.0/iot/{device,device/unbind,product,product/modelProductList}
+/ms-vehicle-core/api/v1.0/vehicle/{favorite-vehicles,enterprise-vehicles,set-default-vehicle,set-nick-name,set-plate-number}
+
+# ms-user-auth（13）
+/ms-user-auth/api/v1.0/auth/{scanLogin,cloud/temp/code}      <- temp/code 实测 000000
+/ms-user-auth/api/v1.0/{account/affection[/unbind],csp/{relation,resetPassword,user,verification/mobilePhone[/cspmobile]}}
+/ms-user-auth/api/v1.0/face/{delete,dhu-wakeup,pictureUpload,registered}
+
+# ms-vehicle-defence（电子围栏） / ms-vehicle-guard
+/ms-vehicle-defence/api/v1.0/fence/{create,delete,enable,page,update}
+/ms-vehicle-guard/api/v1.0/sentinel/queryPhotoList
+```
+
+## 车辆分享（CarShare）业务域 —— 一条完整的「合法授权」通道
+
+`ms-tsp-user-vehicle` 上的 REST 全族（dex 原文，21 条）：
+
+```
+/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/owner/share          创建分享
+/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/owner/share-list     我分享出去的
+/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/owner/share-histories
+/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/owner/delete
+/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/share/accept         接受分享
+/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/share/reject
+/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/share/delete
+/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/share/accept-list    我收到的分享
+/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/share/accept-histories
+/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/share/upload-base64
+/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/share/social-sharing-info
+/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/share-status
+/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/details?shareId=
+/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/services             可分享服务清单（SDK 门禁）
+/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/check-share          校验被分享账号（SDK 门禁）
+/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/update-auth          设置分享权限
+/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/cancel
+/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/finish
+/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/force-cancel
+/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/force-finish
+```
+
+App 侧 UI 文案（dex）：侧边栏-车辆分享、创建车分享、接受车分享、拒绝车分享、结束车分享、
+设置车分享权限、添加分享账号、校验被分享账号、无法分享给自己、收到的车辆分享、车分享详情、
+分享码已复制、超过最大分享次数、分享数字钥匙已存在。
+
+SDK（`com.geely.snc.sdk.carshare`，Geely CarShare SDK）：
+`IGLCarShareService` / `GLGeelyCarShareService` 方法：createCarShare、acceptCarShare、rejectCarShare、
+cancelCarShare、finishCarShare、updateCarShare、detailsCarShare、onwerListCarShare、
+acceptListCarShare、loopCarShareStatus、forceCancelCarShare、forceFinishCarShare、
+ownerDeleteCarShare、acceptDeleteCarShare、uploadBase64CarShare、getUrlCarShare、
+**queryVehicleServiceList**。
+请求 Bean：`GlCarShare{Create,Accept,Reject,Cancel,Finish,Update,Delete,Details,List,Loop,Url,Upload,VerifySharingUser,ForceCancel,ForceFinish}ReqBean`；
+响应：`GlCarShare{ServiceList,Condition,Details}RespBean`、`ShareDetailFunctionInfo`、`ServiceListBean`、
+`ShareVehVoHF(shareId=`、`VehicleShareBean.kt`。
+
+**实测（本账号 16620192335）**：四个 list 端点全部 total=0 —— 这个号**既不是分享方也不是被分享方**，
+所以「非车主却有完整车控」并非来自车辆分享，而是 TSP 侧的直接绑定。
+
+## 两条「换令牌」候选链（当前最高优先级）
+
+1. **场景码 → authCode → SNC 令牌**
+   `POST /zeekrlife-app-user/v1/user/toc/authCodeByServiceCode`（实测缺「场景代码」参数，参数名待定）
+   → `com.geely.snc.login` 的 `AuthLoginReqBean(authCode=)` → `AuthLoginRspBean(accessToken=)`
+   （`IGLAuthLoginService` / `GLAuthLoginServiceImpl` / `GLTokenInterceptor`）。
+   佐证：`PhoneModifyAuthCodeReq(scene=` ⇒「场景」就是 authCode 的入参概念；
+   `com.geely.snc.action.login.elsewhere` 即我们遇到的「登录被顶替」广播。
+2. **`AccessCodeReq(clientId=)` → `/zeekrlife-mp-auth2/v1/auth/accessCode`**（路由存在，动词待定）。
+
+## 车控 SDK（原生层，SDK 令牌持有者）
+
+`com.zeekr.snc.vehicle`：`core/net/http/VclHttpApi|VclHttpReq|VclHttpRsp|VclHttpUrl|VclHttpParam`、
+`core/net/mqtt/VclMqttMsg|VclMqttRsp`（**MQTT 通道**）、`core/net/wifi/VclWifiSdk`、
+`iot/GLIotService`、`iot/utils/IIotTokenHelper`、`log/ITokenHelper`、`dlp/dmc/ZeekrDlcTokenHelper`、
+`utils/ZeekrENVKt`（`getVclCtrlApi$module_vehicle_release`）。
+⇒ SDK 令牌很可能经由 **IoT 令牌**体系下发。
+
+## 已收敛的请求头线索（dex 头名池）
+
+`X-TSP-PLATFORM`、`X-REGION-ID`、`X-A-Key`、`X-S-Key`、`X-Key-Token`、`X-APP-KEY`、`X-APIKEY`、
+`X-API-SIGNATURE-{NONCE,VERSION}`、`X-HMAC-{ACCESS-KEY,ALGORITHM,DIGEST,SIGNATURE}`、
+`X-ENCRYPTION-{KEY,KEY-ID,VERSION}`、`X-Request-CipheredOverlay{Key,IV,Version}`。
