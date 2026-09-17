@@ -1,0 +1,226 @@
+{
+ "控制:车辆状态v2": {
+  "method": "GET",
+  "path": "/ms-vehicle-status/api/v2.0/vehicle/status/latest",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "控制:车辆状态qrvs": {
+  "method": "GET",
+  "path": "/ms-vehicle-status/api/v1.0/vehicle/status/qrvs",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "控制:车辆状态vtm": {
+  "method": "GET",
+  "path": "/ms-vehicle-status/api/v1.0/vehicle/status/vtm",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "控制:发送指令": {
+  "method": "POST",
+  "path": "/ms-remote-control/v1.0/remoteControl/control",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "控制:指令入口(带api)": {
+  "method": "POST",
+  "path": "/ms-remote-control/api/v1.0/remoteControl/control",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "控制:空调AI": {
+  "method": "POST",
+  "path": "/ms-remote-control/api/v1.0/remoteControl/aiClimate",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "控制:空调查询": {
+  "method": "GET",
+  "path": "/ms-remote-control/api/v1.0/remoteControl/queryAiClimate",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "账号:权限清单": {
+  "method": "GET",
+  "path": "/ms-app-bff/api/1.0/permissions",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "账号:车辆详情": {
+  "method": "GET",
+  "path": "/ms-vehicle-account/api/v1.0/vehicle-detail",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "车主授权码": {
+  "method": "POST",
+  "path": "/ms-app-bff/api/v1.0/mntmode/authCode/ownerAuthorization",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "车辆证书": {
+  "method": "POST",
+  "path": "/ms-app-bff/api/v1.0/certificate-center/getVehicleCertificate",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "分享:可分享服务": {
+  "method": "GET",
+  "path": "/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/services",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "分享:校验账号": {
+  "method": "GET",
+  "path": "/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/check-share",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "轨迹:行程分页": {
+  "method": "POST",
+  "path": "/ms-vehicle-trail/api/v1.0/journalLog/trip/listForPage",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "轨迹:轨迹点": {
+  "method": "GET",
+  "path": "/ms-vehicle-trail/api/v1.0/journalLog/trackpoint/list",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "围栏:分页": {
+  "method": "POST",
+  "path": "/ms-vehicle-defence/api/v1.0/fence/page",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "数字钥匙:绑定用户": {
+  "method": "POST",
+  "path": "/ms-tsp-dkbs-geely/api/v1.0/app/digital-key-center/get-bind-user-list",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "数字钥匙:剩余槽位": {
+  "method": "POST",
+  "path": "/ms-tsp-dkbs-geely/api/v1.0/app/digital-key-center/get-remaining-slot-quantity",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "充电:最新SOC": {
+  "method": "GET",
+  "path": "/ms-charge-manage/api/v1.0/charge/getLatestSoc",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "充电:行程计划v2": {
+  "method": "POST",
+  "path": "/ms-charge-manage/api/v2.0/charge/getTravelPlan",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "人脸:已注册": {
+  "method": "GET",
+  "path": "/ms-user-auth/api/v1.0/face/registered",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "IoT:设备": {
+  "method": "GET",
+  "path": "/ms-iot-device/api/v1.0/iot/device",
+  "code": "079001",
+  "msg": "[SDK]此接口未被授权，无法访问!",
+  "verdict": "门禁",
+  "gated": "True"
+ },
+ "哨兵:图片列表": {
+  "method": "GET",
+  "path": "/sentinel-monitoring-service/api/v2.0/pic/list",
+  "code": "0",
+  "msg": "success",
+  "verdict": "可用",
+  "gated": "False"
+ },
+ "基线:指令结果查询": {
+  "method": "GET",
+  "path": "/ms-remote-control/v1.0/remoteControl/queryProcessResult",
+  "code": "000002",
+  "msg": "The request parameter sessionId is missing or empty",
+  "verdict": "放行",
+  "gated": "False"
+ },
+ "基线:分享列表(我收到)": {
+  "method": "GET",
+  "path": "/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/share/accept-list",
+  "code": "000000",
+  "msg": "ok",
+  "verdict": "可用",
+  "gated": "False"
+ },
+ "基线:分享列表(我发出)": {
+  "method": "GET",
+  "path": "/ms-tsp-user-vehicle/api/v1.0/vehicle-shares/owner/share-list",
+  "code": "000000",
+  "msg": "ok",
+  "verdict": "可用",
+  "gated": "False"
+ },
+ "基线:用户车辆设置": {
+  "method": "POST",
+  "path": "/ms-tsp-user-setting/api/v1.0/userVeh/setting/query",
+  "code": "000000",
+  "msg": "ok",
+  "verdict": "可用",
+  "gated": "False"
+ },
+ "基线:临时码": {
+  "method": "GET",
+  "path": "/ms-user-auth/api/v1.0/auth/cloud/temp/code",
+  "code": "000000",
+  "msg": "ok",
+  "verdict": "可用",
+  "gated": "False"
+ }
+}
