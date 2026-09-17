@@ -458,3 +458,55 @@ ownerDeleteCarShare、acceptDeleteCarShare、uploadBase64CarShare、getUrlCarSha
 `X-TSP-PLATFORM`、`X-REGION-ID`、`X-A-Key`、`X-S-Key`、`X-Key-Token`、`X-APP-KEY`、`X-APIKEY`、
 `X-API-SIGNATURE-{NONCE,VERSION}`、`X-HMAC-{ACCESS-KEY,ALGORITHM,DIGEST,SIGNATURE}`、
 `X-ENCRYPTION-{KEY,KEY-ID,VERSION}`、`X-Request-CipheredOverlay{Key,IV,Version}`。
+
+## 2026-09-18 深夜续：分享记录为空 vs 车主已分享 —— 需要 App 侧核对
+
+### 新增实测（GW3，令牌 `azp=user_center_client_phone`）
+
+```
+GET  /ms-app-bff/api/1.0/permissions?tspPlatform=<n>   账号对该车的权限清单
+     数字 0/1/2 → 过参数校验但 079001（SDK 门禁）；字符串 → 000002 param check failed
+     ⇒ tspPlatform 是**数字枚举**（不是平台名），且该接口在 SDK 门禁内
+POST /ms-app-bff/api/v1.0/mntmode/authCode/ownerAuthorization   车主授权码 → 079001（SDK 门禁）
+POST /ms-app-bff/api/v1.0/certificate-center/getVehicleCertificate  车辆证书 → 079001
+GET  /ms-vehicle-account/api/v1.0/vehicle-detail               → 079001
+POST /ms-tsp-user-setting/api/v1.0/userVeh/setting/query       → 000000 ok（可用）
+POST /ms-tsp-user-vehicle/.../vehicle-shares/share-status      唯一标识 = **traceId**
+     ⇒ 分享流程是「创建 → 返回 traceId → POST share-status 轮询」（对应 GlCarShareLoopReqBean(traceId=)）
+GET  /ms-user-auth/api/v1.0/auth/cloud/temp/code               → data.code = 32 位 hex 临时码（扫码登录用）
+     POST 同路径 → 000010（只收 GET）；/auth/scanLogin 也只收 POST
+POST /ms-user-auth/v1.0/auth/login（缺设备字段时）              → 000002 [设备ID不能为空, 设备类型不能为空]
+GET  /ms-user-auth/api/v1.0/account/affection（亲情账号）        → 00A01 404（不在 GW3）
+GET  /ms-user-middle... /ms-user-manager/api/v1.0/user/get/user/info → 00A01 404
+```
+
+### `[SDK]` 门禁边界的完整画像（截至本轮）
+
+**被拒（079001 `[SDK]此接口未被授权，无法访问!`）**：`remoteControl/control`、`vehicle/status/*`、
+`shares/services`、`check-share`、`ms-app-bff/.../permissions`、`mntmode/authCode/ownerAuthorization`、
+`certificate-center/getVehicleCertificate`、`ms-vehicle-account/vehicle-detail`。
+
+**放行**：`remoteControl/queryProcessResult`、`vehicle-shares` 的 4 个查询端点与写端点的参数校验层、
+`ms-tsp-user-setting/.../setting/query`、`ms-user-auth/.../temp/code`、
+`zeekrlife-app-user/.../{secretConfig, authCodeByServiceCode, validateAuthCode}`。
+
+⇒ 门禁呈现为**接口白名单**，与 `X-VIN`、参数、账号车辆权限均无关（同一账号在 App 内可正常车控）。
+
+### 待核实的矛盾（需要 App 侧确认）
+
+车主已把车分享给 `16620192335` 且「享有所有车控权限」，但接口侧：
+
+```
+GET vehicle-shares/owner/share-list      → 000000 ok, total=0
+GET vehicle-shares/share/accept-list     → 000000 ok, total=0
+GET vehicle-shares/{owner/share-histories, share/accept-histories} → 000000 ok, total=0
+```
+
+即：**该号既不是分享方也不是被分享方（服务端视角）**。两种可能：
+1. 分享记录已过期/失效（App 文案有「授权已过期」「该分享已经失效」），
+   但账号仍保留 TSP 侧绑定 ⇒ 车控可用而分享列表为空；
+2. 车控权限来自**另一套绑定**（亲情账号 `account/affection`、家庭成员、企业车辆等），
+   而非 vehicle-shares。
+
+判据：车主 App →「我分享出去的」里那条记录的状态/有效期/权限项；
+以及该号在 App 内是否仍能实际车控（如闪灯/鸣笛）。
