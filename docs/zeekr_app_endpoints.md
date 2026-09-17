@@ -238,3 +238,64 @@
 /ms-vehicle-trail/api/v1.0/journalLog/trackpoint/list
 /ms-vehicle-trail/api/v1.0/journalLog/trip/listForPage
 ```
+
+---
+
+# 2026-09-18 补充：dex 加固结论 + 用户/认证服务路由 + 请求 Bean 字段线索
+
+## dex 加固（决定后续所有逆向手段的选择）
+
+`classes.dex`（195 MB）header 被伪造（`endian_tag`/`string_ids_off` 等全是垃圾值，
+仅 `file_size` 字段疑似真实 = 175662436，与整包 195141696 之差 ~19.5 MB 疑似壳数据）。
+androguard 只能解析出 **45 个壳类**；真实 dex 的 **id 表（string_ids/type_ids/
+field_ids/class_defs）不在明文中**（已用「锚点 u32 反查」+「相对基址 Δ 扫描（含 4096
+对齐与全量扫描）」两种方法证实）。字符串**数据区明文可读** ⇒ 一切结论只能来自
+字符串池（本工具 `tools/inspect_apk.py` 与 `scratch/dex_grep.py`）。
+**结构化解析（字段表/注解/字节码）走不通，别再试。**
+
+## 用户/认证服务路由（GW1 `api-gw-toc` 上实测存活）
+
+服务 `zeekrlife-app-user` 在 GW1 上**真实存在**（此前 tspCode 候选 404 只是路径不对）。
+实测：`GET /zeekrlife-app-user/v1/user/pub/secretConfig` → `000000`，
+返回 RSA **publicKey**（App 的 secret 动态下发，不在 dex 里硬编码）。
+
+关键端点（其余 61 条见会话记录，多为隐私/资料类）：
+
+```
+/zeekrlife-app-user/v1/user/pub/sms/authCode           短信验证码
+/zeekrlife-app-user/v1/user/pub/login/mobile           手机号登录
+/zeekrlife-app-user/v1/user/pub/login/mobile/oneClick  一键登录
+/zeekrlife-app-user/v1/user/pub/login/platform
+/zeekrlife-app-user/v1/user/pub/secretConfig           RSA 公钥下发（实测 000000）
+/zeekrlife-app-user/v1/user/toc/authCodeByServiceCode  按「场景代码」换 authCode（实测 POST {} → 000005 场景代码,不为空）
+/zeekrlife-app-user/v1/user/toc/validateAuthCode       （实测 POST {} → 000005 验证码不为空,场景代码,不为空）
+/zeekrlife-mp-auth2/v1/auth/accessCode                 （GET 400 / POST 405 ⇒ 动词未知，路由存在）
+```
+
+⇒ **存在「场景代码(scene) → authCode → validate」链**，参数名待挖（不是
+`serviceCode`）。这是下一个最可能换出 TSP 能力令牌的入口。
+
+## 控制协议的闭环形状（来自 toString 常量）
+
+- `ControlReqBean(controlType=` / `ControlReqBean15(controlType=` —— 控制请求 Bean；
+  另有构造签名 `(String×9, List, OperationScheduling, TimerEntity, String)`。
+- **`RemoteControlRsp(sessionId=`** ⇒ 控制下发返回 **sessionId**；
+  `ControlResult(sessionId=` / `ControlResultBean(code=` + 路由
+  `queryProcessResult` ⇒ App 的流程是 **下发 → 拿 sessionId → 轮询执行结果**，
+  不是发了就算。我们集成目前只发不等，若 GW2 通道有对应的结果查询接口，
+  闭环验证应优先做这个。
+- `OperationScheduling(duration=`（构造参数
+  `Integer, Long, Boolean, Integer, Integer, Long, Long`）；
+  `TimerEntity(timers=`、`TimerInfo(timerId=`。
+- 空调：`AiClimateReqBean(dataSource=`（GW3 `aiClimate` 用）、
+  `ClimateStatusVo(interiorTemp=`、`SmartTempSettingBean(heat=`。
+
+## serviceId 与参数键（dex 字符串确认）
+
+- **serviceId 全部在 dex 中**：`ZAF`/`RDL`/`RDU`/`RWS`/`RHL`/`RCS`/`RSM`/`PCM`/`RCE`，
+  与集成现用一致。
+- ZAF 参数键：`AC`（存在）、`AC.temp`、`AC.duration` —— 别的没有。
+- **`rce.*` 家族**：`rce.conditioner` `rce.heat` `rce.ventilation` `rce.level`
+  `rce.temp`，以及 **`rce.heat.{11,19,21,25,29,31,39}`**、
+  **`rce.ventilation.{11,19,21,25,29,31,39}`** —— 数字后缀像是温度/档位枚举，
+  用法待定（可能是 `rce.heat` 的取值集合，也可能是组合键）。
