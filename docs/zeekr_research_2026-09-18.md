@@ -539,3 +539,59 @@ deviceId = 291d2cec-c5c0-43b9-b7f8-8fba770f04ce
    同时找 `auth_client_zeekr_phone` 对应的登录/换令牌端点。
 3. 备选：**再抓一次包含「退出登录 → 重新登录」的抓包**，
    即可完整看到令牌获取链路（当前抓包里令牌是缓存的，没有出现获取过程）。
+
+---
+
+# 2026-09-18 晚（续）：唯一缺口锁定为「`GEELYCNCH001M0001` 的共享密钥」
+
+## 实测矩阵（GRIC 网关，`gric-zhf-api.geely.com/ms-app-bff/api/1.0/permissions?tspPlatform=4`）
+
+| 条件 | 返回 | 判读 |
+| --- | --- | --- |
+| 无 Authorization | `00A02 header 'AUTHORIZATION' is required` | 头校验在签名校验**之前** |
+| 任意编造的 app-id + 我们的签名 | `00A22 The app information does not exist.` | **签名不作为判据**（网关不知道这个 app），只是 app 未注册 |
+| `GEELYCNCH001M0001` + 我们的签名 | `00A06 Signature authentication failed.` | 该 app **已注册** ⇒ 网关用**它自己的密钥**校验，我们的不匹配 |
+| 同上，签名版本改 1.0 | `00A02 Unsupported signature version` | 只支持 2.0 / 2.1 |
+
+⇒ 结论铁定：**签名算法我们已经实现正确**（此前 ZEEKR app-id 在 GRIC 上通过签名校验就是证明），
+**唯一缺的是 `GEELYCNCH001M0001` 那一把共享密钥**。
+
+## 密钥不在客户端静态数据里（已穷尽）
+
+- **整包逐字节扫描**（597 MB，全部 zip 条目）：`GEELYCNCH001M0001` 出现 **0 次**；
+  `CNCH` 只有三个变体：`ZEEKRCNCH001M0000` / `ZEEKRCNCH001M0001` / `ZEEKERCNCH001M0001`。
+- **97 个 .so 全扫**：只有 `libfq.so` / `libnative-lib.so` 含 `ZEEKR`（人脸 SDK `ZEEKR_FaceID*`），无 app-id 无密钥。
+- `libHttpSecretKey.so` 只暴露
+  `Java_com_haohan_module_http_encrypt_HttpSecretKey_{get,set}SecretKey` ⇒ **密钥是运行时由 Java 侧 set 进去的**。
+- 用户提供的 APK（`C:/Users/rexze/Documents/OPPO 互联/极氪.apk`）与仓库外那份 `Downloads` APK **完全一致**
+  （同为 597 MB、同 dex、同 so 清单、同样只有 ZEEKR 变体）⇒ 版本确实是 v5.0.5，不是版本差异问题。
+- `_SNC_SECRET` 不是 app-id 派生（md5/sha1/sha256 各类拼法已穷举）。
+- 抓包中的 `x-app-version: v1.0.0` 应是 **GRIC SDK 自己的版本号**，不是 App 版本。
+
+## 第二次抓包（退出登录）未取到东西
+
+- 用户反馈「退出登录网络报错」，抓包文件 `capture/zeekr-20260918-1942.flow` 中
+  **完全没有 logout / login / token 相关请求**，只有心跳与车况轮询（全 200）。
+  ⇒ 报错发生在 App 内部，请求未发出（疑似走 HTTP/3，代理无法拦截）。
+- 但即便抓通登录流程，**共享密钥也永远不会出现在流量里**（它是本地常量/运行时下发，随请求只走签名结果）。
+  ⇒ 抓登录对「拿密钥」帮助有限，只对「令牌获取链路」有价值。
+
+## 两条可行路线（需用户决策）
+
+**路线 A（低代价、不确定）：清除 App 数据后抓冷启动**
+`设置 → 应用管理 → 极氪 → 清除数据`，然后抓包并重新登录。若密钥是**服务端下发**的，
+这次会出现下发请求；若是本地常量则什么也看不到。
+⚠️ 风险：会清掉 App 本地状态，**若手机上有蓝牙数字钥匙可能需要重新创建**；也会退出登录。
+
+**路线 B（高代价、高确定性）：frida 动态提取**
+在 Android 模拟器（可 root）里装 App + frida-server，hook
+`HttpSecretKey.getSecretKey` 或签名函数直接 dump 密钥。
+不需要登录即可拿到客户端常量；若密钥随登录下发，则需要登录（会顶掉手机，需事后重新登录）。
+产出：**一把密钥 + 完整可复现的签名**。
+
+**不可行**：重放抓包中的请求——`x-timestamp` 有有效窗口，只能当次有效，无法支撑 HA 长期使用。
+
+## 已确知、可直接落地的部分（与密钥无关）
+
+App 的完整调用链已经逐字节掌握（网关、路径、全部请求头、`x-vehicle-identifier` 生成方式我们已具备、
+请求体结构、响应 `sessionId` 与 `queryProcessResult` 闭环）。**一旦拿到密钥，接入是纯工程工作。**
