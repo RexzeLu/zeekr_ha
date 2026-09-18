@@ -37,9 +37,18 @@ import zeekr_probe as zp  # noqa: E402
 VIN = "L6T77HCE9PF081833"
 TSPCODE_PATHS = (
     "/zeekrlife-app-user/v1/user/tspCode",
+    "/zeekrlife-app-user/v1/user/tspToken",
     "/zeekrlife-app-user/v1/user/toc/tspCode",
+    "/zeekrlife-app-user/v1/user/toc/tspToken",
     "/zeekrlife-app-user/v1/user/pub/tspCode",
+    "/zeekrlife-app-user/v1/user/pub/tspToken",
+    "/zeekrlife-app-user/v1/user/pub/toc/tspCode",
+    "/zeekrlife-app-user/v1/user/getTspToken",
+    "/zeekrlife-app-user/v1/user/getTspCode",
+    "/zeekrlife-app-user/v1/user/tsp/host",
+    "/zeekrlife-app-user/v1/user/tsp/user",
 )
+TSP_CLIENT_ID = "1JwLroFkFFIpgFGdTRrm4_nzkkwDkfHj7RxJQb7J8tc"
 # 只读探针：不含任何会动作车的写接口
 PROBES = (
     "/ms-vehicle-status/api/v2.0/vehicle/status/latest",
@@ -89,6 +98,10 @@ async def main() -> None:
     ap.add_argument("--phone", default="16620192335")
     ap.add_argument("--code", help="短信验证码")
     ap.add_argument("--send-sms", action="store_true", help="只发验证码")
+    ap.add_argument("--jwt-file",
+                    default="C:/Users/rexze/AppData/Local/Temp/zeekr_jwt.txt",
+                    help="JWT 缓存文件（避免反复要验证码）")
+    ap.add_argument("--force-login", action="store_true", help="忽略缓存强制重新登录")
     ap.add_argument("--vin", default=VIN)
     args = ap.parse_args()
 
@@ -103,39 +116,49 @@ async def main() -> None:
         print("\n请把收到的验证码用 --code 传入再跑一次。")
         return
 
-    if not args.code:
-        print("需要 --code（或用 --send-sms 先发验证码）")
-        return
+    # ---------- 步骤 2：GW1 手机登录（支持 JWT 缓存，避免反复要验证码）----------
+    jwt_file = pathlib.Path(args.jwt_file)
+    jwt = None
+    if jwt_file.exists() and not args.force_login:
+        cached = jwt_file.read_text(encoding="utf-8").strip()
+        if cached:
+            jwt = cached
+            print(f"[0] 复用缓存 JWT（{len(jwt)} 字符）<- {jwt_file}")
 
-    # ---------- 步骤 2：GW1 手机登录 ----------
-    print("=" * 66)
-    print("[1] GW1 手机验证码登录")
-    login = await client._gw1_login(args.phone, args.code)
-    print("    ->", brief(login))
-    jwt = find_jwt(login)
-    if not jwt:
-        print("    [!!] 未从响应里找到 JWT，后续无法继续。完整响应：")
-        print("    ", brief(login, 1200))
-        return
+    if jwt is None:
+        if not args.code:
+            print("需要 --code（或用 --send-sms 先发验证码）")
+            return
+        print("=" * 66)
+        print("[1] GW1 手机验证码登录")
+        login = await client._gw1_login(args.phone, args.code)
+        print("    ->", brief(login, 400))
+        jwt = find_jwt(login)
+        if not jwt:
+            print("    [!!] 未从响应里找到 JWT。完整响应：")
+            print("    ", brief(login, 1500))
+            return
+        jwt_file.write_text(jwt, encoding="utf-8")
+        print(f"    JWT 已获取（{len(jwt)} 字符）并缓存 -> {jwt_file}")
     client._jwt_token = jwt
-    print(f"    JWT 已获取（{len(jwt)} 字符）")
 
-    # ---------- 步骤 3：拿 tspCode ----------
-    print("\n[2] 获取 tspCode")
+    # ---------- 步骤 3：拿 tspCode / tspToken ----------
+    print("\n[2] 获取 tspCode / tspToken")
     tsp_code = None
     for path in TSPCODE_PATHS:
-        for params in ({"tspClientId": "1JwLroFkFFIpgFGdTRrm4_nzkkwDkfHj7RxJQb7J8tc"}, None):
+        for params in ({"tspClientId": TSP_CLIENT_ID}, None):
             try:
                 r = await client._gw1("GET", path, params=params)
             except Exception as exc:  # noqa: BLE001
-                print(f"    {path:52} ERR {str(exc)[:50]}")
+                print(f"    {path:48} ERR {str(exc)[:46]}")
                 continue
-            code = str(r.get("code") or r.get("error_code") or "")
-            if code == "000000":
-                tsp_code = find_field(r, ("tspCode", "code", "tspToken"))
-                print(f"    {path:52} -> 000000  tspCode={tsp_code}")
-                break
-            print(f"    {path:52} -> {code} {str(r.get('msg') or '')[:44]}")
+            tag = "?" if params else " "
+            print(f"    {path:46}{tag} -> {brief(r, 260)}")
+            if str(r.get("code") or r.get("error_code") or "") == "000000":
+                tsp_code = find_field(r, ("tspCode", "tspToken", "token", "code"))
+                if tsp_code:
+                    print(f"    >>> 命中：{path}")
+                    break
         if tsp_code:
             break
     if not tsp_code:

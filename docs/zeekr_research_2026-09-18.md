@@ -741,3 +741,101 @@ python tools/zeekr_bearer_chain.py --phone 16620192335 --code <6位码>
 4. `x-vehicle-identifier` 的真实构造（非简单 AES(VIN)）。
 5. GRIC 的 `x-signature` 密钥（静态不可得；若 GW3+bearer 链路成立则**不再需要**）。
 6. 若 GW3+bearer 链路仍不通，备选是 `sunshijiang` 的 HMAC 路线（需先确认其端点是否真可用——该项目的 CN 端点路径是**猜的**，靠 3×3 穷举撞成功）。
+
+---
+
+# 2026-09-18 夜（用户配合实跑）：三处否证 + libenv.so 全解密
+
+## 一、成功拿到的资产
+
+- **GW1 手机验证码登录成功**（验证码是 **4 位**，不是 6 位）。
+- **JWT 已缓存**到 `C:/Users/rexze/AppData/Local/Temp/zeekr_jwt.txt`（1842 字符，`Bearer …` 前缀自带），
+  由 `tools/zeekr_bearer_chain.py` 写入并复用 ⇒ **后续探测不再需要用户提供验证码**。
+
+## 二、三处否证（都很重要，避免走回头路）
+
+### 1) `tspCode` 中国区路由**不存在**（修正此前的"重大发现"）
+
+带**有效 JWT** 后实测 11 条候选路径，全部是 Spring 原生 404：
+
+```
+{"timestamp":"2026-09-18 20:56:52","status":404,"error":"Not Found","path":"/v1/user/tspCode"}
+```
+
+`path` 字段显示网关剥掉了 `/zeekrlife-app-user` 前缀 ⇒ 服务在、路由不在。
+**结论**：此前看到的 `000009 多设备登录` 只是**网关层的会话失效拦截**（发生在路由解析之前），
+**不能作为"路由存在"的证据**。上一轮据此得出的"tspCode 路由存在"是**误判，已作废**。
+
+### 2) `identityType: 10` 中国区**不通**，且与客户端头无关
+
+全矩阵（3 种客户端头集合 × identityType 1–12 × 3 种 identifier = 108 次）：
+
+| 结果 | 说明 |
+| --- | --- |
+| `identityType=5` → **`000000` + 令牌** | 唯一可用（任何 identifier 都行） |
+| `identityType=2` → `015000 参数错误` | 另一个分支 |
+| **其余全部 `015013 登录权限校验不正确`** | 含 10 |
+
+三种客户端头（无 / 最小集 / **海外版完整 `DEFAULT_HEADERS`**）结果**逐字节相同**。
+⇒ **海外版的 `tspCode + identityType:10` 认证链在中国区不适用**，不是"缺客户端头"。
+
+### 3) `x-signature` 的密钥**静态不可得**（两轮爆破均零命中）
+
+| 轮次 | 候选来源 | 规模 | 结果 |
+| --- | --- | --- | --- |
+| 1 | dex 明文字符串池 | **786,079** × 48 变体 | 0 命中 |
+| 2 | **`libenv.so` 解密字符串** | 215 × 48 变体 | 0 命中 |
+
+变体覆盖：头集合 4 种（`ALLOWED` / `+CN扩展` / 全 `x-*` / 仅CN头）× query 3 种 × 尾部 2 种 × body 2 种。
+⇒ 密钥既不在 dex 明文池、也不在 `libenv.so` 的解密区 ⇒ **加密封装**（`libEncryptorP.so` / iWall 白盒），
+**纯静态不可得**。
+
+## 三、`libenv.so` 全解密（本轮新增资产）
+
+`libenv.so`（133 KB，ARM64）是 **OLLVM 加密**布局（`EnvTableResolver.looks_like_new_format=False`，
+明文字符串只有 165 条全是 JNI 名字）。用 extractor 的 `NativeLibAnalyzer.decrypt_strings()`
+（`extended = data + 0x10000` 后按 vaddr XOR）**解密出 91 条字符串**：
+
+**（a）网关主机表——15 环境 × 4 stage**（注意：**全是 `zeekrlife*` / `zeekr.eu` / `zeekr.co.il`，
+没有任何 `geely.com` / `gric`**）：
+
+```
+f2e-sit / f2e-uat / f2e
+gateway-int-test / gateway-int-dev / gateway-int-uat / gateway-pub-uat / gateway-pub
+gateway-pub-azure.zeekr.eu / gateway-pub-em / gateway-pub-em.zeekrlife-test
+gateway-int-uae-dev / gateway-int-uae-test / gateway-pub-uae-uat
+gateway-pub-aws-em-ae / gateway-pub-hw-em-sg(-uat) / gateway-pub-hw-em-mx(-uat)
+gateway-pub-*/zom-pay-gateway/zom-pay-core-service/
+overseas-dev / overseas-sit / website-eu-uat / www.zeekr.eu / website-em-* / www.zeekr.co.il
+```
+
+**（b）密钥表**：22 个 32-hex + 十几条 40 字符 + 2 条特殊字符长串，其中已确认：
+
+```
+7dbae691d53f4f3c9fab905368370d80        = hmac_access_key（CN 行）
+hnpigl1f13fcb6a3ac834895b9e403c08cd895ce = hmac_secret_key（CN 行）
+```
+
+**推论**：`libenv.so` 是**海外环境表**，中国区/GRIC 的配置不在这里 ⇒ 印证 GRIC 属**吉利中台**独立体系。
+
+## 四、当前结论（定案）
+
+1. **App 能控车用的是 GRIC 体系**（`gric-zhf-api.geely.com` + `GEELYCNCH001M0001` + `x-signature` 2.1 +
+   `auth_client_zeekr_phone` 令牌），**与我们 GW3 的 `ZEEKR` 体系完全平行**。
+2. **GRIC 的签名密钥静态不可得**（两轮爆破 + 整包 + .so 全扫 + libenv 解密区）。
+3. **中国区没有 `identityType:10` 通道**（实测），所以"换令牌"这条捷径关闭。
+4. ⇒ 要打通控车，**只剩两条路**：
+   - **(A) 动态提取**：真机 root + frida hook（`wysie/zeekr_key_extractor` 的 `vin_hook.js` 思路；
+     APK 是 **arm64-v8a 单架构**，x86 模拟器跑不动，需要真机或 ARM 环境）。
+   - **(B) 完整抓包**：抓一次 **App 冷启动/登录全过程**的包，直接看 GRIC 令牌从哪来
+     （此前的障碍是"挂代理就登录不了"，需改用手机端网卡级抓包 App 或 VPN 模式）。
+
+## 五、下一步可自主进行的部分（不需用户）
+
+用缓存的 JWT 继续探测中国区接口面（`zeekrlife-*` 全族、`ms-user-auth` 中国区分支），
+寻找能换取 GRIC/中台令牌的入口。命令：
+
+```bash
+python tools/zeekr_bearer_chain.py            # 复用缓存 JWT，直接跑 [2]→[4]
+python tools/zeekr_probe.py --creds <tokens.json> gw1 GET <path>
+```
