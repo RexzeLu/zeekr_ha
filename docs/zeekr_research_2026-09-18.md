@@ -429,3 +429,113 @@ GW1 / GW2 / GW3 / `gateway-pub` / `gateway-int-test`）——**全部 404 / 无�
 - `docs/zeekr_capture_playbook.md` 新增 **§0.5 方案 0**：手机自带抓包 App（Reqable 等）VPN 模式，
   **不需要电脑、不需要同一网络**，人在外面也能做；只需截图请求头 + 请求体 + 路径给我。
 - 明确禁止项：**不要把账号登进模拟器**（`logoutOtherDevices: true`，会顶掉用户手机）。
+
+---
+
+# 2026-09-18 晚：抓包成功 —— 找到 App 真实调用链（重大突破）
+
+用户手机抓包成功（`capture/zeekr-20260918-1925.flow`，54 条请求，1 MB），
+操作是「开空调」。**整条链路彻底看清了。**
+
+## 1. App 打的网关不是我们用的那个
+
+```
+gric-zhf-api.geely.com      <- 车控 / 车况 / 权限 / 车辆详情 / 能力集（主）
+gric-api.geely.com          <- 车辆核心（收藏车辆等）
+gric-aic-api.geely.com      <- /think/app/v3/car/function/push
+```
+
+**我们集成打的是 `snc-tsp-api.zeekrlife.com`（GW3）** —— 路径几乎一样，但网关不同，
+所以那边一律回 `079001 [SDK]此接口未被授权`。
+
+## 2. App 的车控请求（逐字节）
+
+```
+POST https://gric-zhf-api.geely.com/ms-remote-control/api/v1.0/remoteControl/control
+
+x-tenant-id: ZEEKR
+x-platform: Android
+x-sales-platform: ZEEKR
+x-device-brand: OPPO
+x-device-model: PLJ110
+x-device-os-version: Android 16 (API 36)
+x-app-version: v1.0.0
+x-app-id: GEELYCNCH001M0001              <- 注意不是 ZEEKRCNCH001M0001
+accept: application/json; charset=UTF-8
+accept-language: zh_CN
+authorization: <JWT, azp=auth_client_zeekr_phone>
+x-api-signature-version: 2.1
+x-api-signature-nonce: 8f2e46d7-9f75-4882-baeb-ea7a2f98a34b
+x-timestamp: 1789731095309
+x-device-id: 291d2cec-c5c0-43b9-b7f8-8fba770f04ce
+x-vehicle-identifier: l1oQt6DQLAWGk8VKjbFBdxXaNr6FhF1h6obO8pgzLw4=     (base64, 32B = AES 加密 VIN)
+x-vehicle-brand: ZEEKR
+x-vehicle-series: QlgxRQ==               (base64 "BX1E" = 车系代码)
+x-tsp-platform: 4                        <- 我们只试过 0/1/2
+x-signature: 05yFNewzZJvAl1n8eYtVwUdDGNTHrETRozJ8OWpQf2Y=
+content-type: application/json; charset=UTF-8
+user-agent: okhttp/4.12.0
+
+请求体（158 B）:
+{"command":"","serviceId":"ZAF",
+ "setting":{"serviceParameters":[
+   {"key":"AC","value":true},
+   {"key":"AC.temp","value":"18.0"},
+   {"key":"AC.duration","value":20}]}}
+
+响应 200:
+{"code":"0","data":{"sessionId":"PF081833000000013109515333902410"},
+ "debug":{"bizName":"ms-mobile-adapter-service",...},"msg":"操作成功"}
+```
+
+要点：
+- 请求体有 **`command: ""`** 这个空字段；
+- `serviceParameters` 是 **`{key,value}` 列表**，`value` 类型随键而变（bool / string / number）；
+- 响应给出 **`sessionId`**（形如 `PF0818330000000131...`），随后用
+  `queryProcessResult` 轮询闭环 —— 与我们此前的推断一致。
+
+## 3. App 的令牌与我们不同
+
+```
+aud = azp = auth_client_zeekr_phone          <- 我们的是 user_center_client_phone
+iss = https://gric-mid-inner.geely.com/ms-auth-service/inner/v1.0/oauth/info
+                                                <- 我们的是 snc-api-gw-inner.../auth-service/...
+sub = openId = 2068684429979209728            <- 同一个账号（与我们相同）
+userId = 403215671   brand = ZEEKR   env = PROD
+deviceId = 291d2cec-c5c0-43b9-b7f8-8fba770f04ce
+```
+
+⇒ **同一账号，两份不同客户端身份的令牌。** 我们的 GW3 登录
+（`/ms-user-auth/v1.0/auth/login`，dex 里根本没有这个路由）拿到的令牌天然进不了 GRIC/SNC 的白名单。
+
+## 4. 我们离成功只差「两个东西」
+
+**[实测] 我们现有的签名实现（`_sign_gw3` + `_SNC_SECRET`）在 GRIC 上是有效的！**
+
+| 组合 | 结果 | 含义 |
+| --- | --- | --- |
+| `x-app-id: ZEEKRCNCH001M0001` + 我们的签名 | `00A02 header property 'X-VEHICLE-SERIES' is required` → 补头后变 `00A22 The app information does not exist.` | **签名通过**，只是该 app-id 未在 GRIC 注册 |
+| `x-app-id: GEELYCNCH001M0001` + 我们的签名 | `00A06 Signature verification failed.` | 该 app-id 存在，但**密钥与我们的不同** |
+
+⇒ 缺的两样：**① `GEELYCNCH001M0001` 的签名密钥；② `auth_client_zeekr_phone` 那份令牌的来源。**
+（`x-vehicle-identifier` 我们也能生成：`_encrypt_vin` 输出同样是 44 字符 base64/32 字节。）
+
+## 5. 密钥不在我们手里的 APK 里
+
+- dex 里只有 **`ZEEKRCNCH001M0000` / `ZEEKRCNCH001M0001` / `ZEEKERCNCH001M0001`**，
+  **没有 `GEELYCNCH001M0001`**；
+- `_SNC_SECRET` 也不是从 app-id 简单派生（已穷举 md5/sha1/sha256 各种拼法，全不匹配）；
+- `secretConfig` 只返回 RSA 公钥，不含签名密钥；
+- 抓包里 `x-app-version: v1.0.0`，而我们逆向的 APK 是 **v5.0.5**。
+
+⇒ **用户手机上那个 App 很可能不是我们手里的这一版**
+（`x-app-version: v1.0.0` 也可能是 GRIC SDK 自身的版本号，待确认）。
+
+## 下一步（需要用户）
+
+1. **极氪 App 的版本号**（App → 我的 → 设置 → 关于）。
+2. **最好能把那个 APK 导出给我**（OPPO 可用「应用管理 → 分享/提取安装包」，或任意 APK 提取器）。
+   我会在新 APK 的字符串池里搜 `GEELYCNCH001M0001`，它的邻居极可能就有那把 32 位密钥；
+   同时找 `auth_client_zeekr_phone` 对应的登录/换令牌端点。
+3. 备选：**再抓一次包含「退出登录 → 重新登录」的抓包**，
+   即可完整看到令牌获取链路（当前抓包里令牌是缓存的，没有出现获取过程）。
