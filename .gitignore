@@ -33,3 +33,7 @@ notes/
 /config_entry-*.json
 scratch/
 _scratch/
+
+# 抓包文件（含令牌，绝不提交）
+capture/
+!capture/.gitkeep
