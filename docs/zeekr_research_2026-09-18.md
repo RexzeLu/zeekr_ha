@@ -300,3 +300,86 @@ $PY tools/zeekr_route_sweep.py --creds "$CREDS" \
 8. 数字钥匙族所需 `signature` / `deviceid` 的算法与来源 —— 疑为 SDK 内部签名。
 9. `/ms-remote-control/api/v1.0/...`（带 `api`）与集成现用不带 `api` 的路径是否等价 ——
    两者实测同码，**未定论**，接入前需确认。
+
+---
+
+# 2026-09-18 上午：App 侧证据到手，两个关键事实被推翻/确立
+
+## 用户提供的两张 App 截图（决定性证据）
+
+### 截图 B：`收到的车辆分享`
+```
+车辆           小粉 / 1833            <- 尾号 1833 = L6T77HCE9PF081833，与本项目 VIN 一致
+分享来自账号   酒酿澜澜圆子 / 13874333029   <- 车主账号
+分享状态       已接受
+分享时间       2026/09/16 01:35
+接受时间       2026/09/16 01:35
+底部按钮       结束用车
+```
+
+**⇒ 车辆分享真实存在且已接受**（2026-09-16 建立）。这与接口侧
+`vehicle-shares/{share/accept-list, accept-histories}` 返回 `total=0` **矛盾**，
+详见下节推论。
+
+### 截图 A：`爱车提醒`（报警列表）
+```
+[小粉]执行失败，请重试。请确认车端软件和手机APP版本为最新，若问题仍存在，请联系售后服务
+2026-09-17 02:10 / 02:08 / 02:08 / 01:04 / 01:03
+```
+
+**⇒ 指令确实被送达车端，车端尝试执行后失败。** 时间窗（09-17 01:03–02:10）
+与项目记录中「GW2 `PUT /remote-control/vehicle/telematics/{VIN}` 测 5 组参数变体」
+的时段吻合。与历史结论「GW2 回 `1000` 但车不动 ⇒ 病根在车端执行」完全一致。
+提示语「请确认车端软件和手机APP版本为最新」暗示**协议版本不匹配**。
+
+## GW1 JWT 解码（本机凭据文件，无需联网）
+
+```
+iss=prod   aud=app   exp=1821127660
+sub = { accountInfoDTO: { accountId 2068684429979209728, mobile 16620192335,
+                          nickname 极氪用户_M1ZT6LbH, city 广州市, 海珠区,
+                          buSite 1, channel 3, tenantId 0, registerBusinessType 8352008 },
+        accountLoginInfoDTO: {
+          agoLoginDeviceName  "iPhone13",  agoLoginAt  1789585388891,
+          lastLoginDeviceName "Android SDK built for arm64",
+          lastLoginDeviceId   299c9bc6ebe34c8994def00068988006,
+          logoutOtherDevices  true            <- 单设备策略，顶号由此而来
+        } }
+client_id = APPLE0000APP00IPHONE266M14110026      <- 32 字符，iOS 客户端标识
+user_id   = 403215671
+```
+
+**⇒ `logoutOtherDevices: true` 被服务端确认**，解释了所有 079021「登录被顶替」现象。
+**⇒ 我的 `client_id` 是 iOS 的**；账号登录历史里出现过 `iPhone13`，说明用户手机
+很可能就是用 `16620192335` 登录的（需用户确认）。
+
+## dex 结构修正（重要）
+
+- **`ControlReqBean(controlType=` / `ControlReqBean15(controlType=` 属于数字钥匙蓝牙协议**
+  （`com/geely/snc/digitalkey/base/dk/business/protocol/dk{15,20}/bean/`），
+  **不是 HTTP 控制请求体**。此前把它当作 HTTP 请求 Bean 是误判。
+- HTTP 控制一族实为：`RemoteControlReq` / **`RemoteControlSetting(serviceParameters=`** /
+  `RemoteControlParams(qrInfo=` / `EnergyBaseRequest(serviceId=` /
+  `EnergyBaseRequestSetting(serviceParameters=` / **`ControlResult(sessionId=`、
+  `ControlResult(iotRemoteControlType=`** / `OperationScheduling(duration=`。
+- dex 中**不存在** Android 形态的 client_id（形如 `XXXX0000APP...`）；iOS 那个也不在 dex 里
+  ⇒ client_id 由服务端下发（`/zeekrlife-app-user/v1/user/pub/secretConfig` 等）。
+
+## 推论链（当前最可能的完整解释）
+
+1. 账号 `16620192335` 对车辆 `小粉` 具备**已接受的车辆分享**（含车控权限）；
+2. App 用该账号可正常进入车辆页并展示「结束用车」，说明**账号权限是有的**；
+3. 但本集成走 `/ms-user-auth/v1.0/auth/login` 拿到的 GW3 令牌
+   （`azp=user_center_client_phone`、`scope=""`）被 21 个控制类接口以
+   `079001 [SDK]此接口未被授权` 拒绝；
+4. ⇒ **门禁判定的是「客户端身份」（token 的 azp/aud/scope），与账号车辆权限无关**。
+   假设 A 基本坐实，假设 B 被截图 B 直接削弱。
+
+## 仍待用户确认（一个二选一就能定案）
+
+- **在 App 里点一次车控（闪灯/锁车）到底成功吗？**
+  - 成功 ⇒ 同一账号、同一手机号，App 能而 API 不能 ⇒ **纯粹是客户端身份问题**，
+    必须走抓包拿到 App 用的令牌（`docs/zeekr_capture_playbook.md`）。
+  - 也失败（同样「执行失败」）⇒ 病根在**车端执行/协议版本**，
+    与令牌无关，方向转为「找出车端接受的指令格式」，抓包同样是第一步。
+- 截图是用哪个号码登录看到的？（`16620192335` 还是用户常用号）
