@@ -383,3 +383,49 @@ user_id   = 403215671
   - 也失败（同样「执行失败」）⇒ 病根在**车端执行/协议版本**，
     与令牌无关，方向转为「找出车端接受的指令格式」，抓包同样是第一步。
 - 截图是用哪个号码登录看到的？（`16620192335` 还是用户常用号）
+
+---
+
+# 2026-09-18 上午（续）：关键推论 —— 我们的 GW3 登录流程不是 App 的流程
+
+## 推论与证据
+
+把 dex 里 `ms-user-auth` 的**全部 13 条路由**列出来：
+
+```
+/ms-user-auth/api/v1.0/account/affection[/unbind]
+/ms-user-auth/api/v1.0/auth/cloud/temp/code
+/ms-user-auth/api/v1.0/auth/scanLogin
+/ms-user-auth/api/v1.0/csp/{relation,resetPassword,user,verification/mobilePhone[/cspmobile]}
+/ms-user-auth/api/v1.0/face/{delete,dhu-wakeup,pictureUpload,registered}
+```
+
+**里面没有 `/auth/login`。** 而本集成拿 GW3 令牌用的正是
+`POST /ms-user-auth/v1.0/auth/login`（body 带 GW1 JWT、`identityType: 5`）。
+
+⇒ **该端点是「能用」，但不是 App 用的那条路。** 它的令牌
+（`azp=user_center_client_phone`、`scope=""`）天然不在 `[SDK]` 白名单里。
+
+同族里名字最像「App 取令牌」的是：
+
+```
+/ms-midground-user/api/v1.0/user/auth/{get/token, refresh/token, hfScanLogin, cancel/login, logout}
+```
+
+本轮对它做了**多路径 × 多网关**矩阵实测（`/api/v1.0/`、`/v1.0/`、去掉 `ms-` 前缀；
+GW1 / GW2 / GW3 / `gateway-pub` / `gateway-int-test`）——**全部 404 / 无路由**。
+⇒ 宿主仍未定位（疑为 H5/中台侧主机，dex 主机表里暂无匹配）。
+
+## 因此的结论
+
+**抓包从「加速手段」升级为「唯一可行路径」**：只有看到 App 真实的那一次控制请求，
+才能知道它（a）打哪个 host/path，（b）带哪份 `Authorization`，（c）带哪些 `X-*` 头，（d）请求体长什么样。
+静态手段（字符串池考古 + 端点轰测）已基本挖尽。
+
+## 等待期间已完成的准备
+
+- `tools/zeekr_capture_start.py`：自动探测本机局域网 IP、启动 mitmdump、把手机侧步骤（含 IP）打印出来；
+  支持 `--zeekr-only` 只代理极氪域名。
+- `docs/zeekr_capture_playbook.md` 新增 **§0.5 方案 0**：手机自带抓包 App（Reqable 等）VPN 模式，
+  **不需要电脑、不需要同一网络**，人在外面也能做；只需截图请求头 + 请求体 + 路径给我。
+- 明确禁止项：**不要把账号登进模拟器**（`logoutOtherDevices: true`，会顶掉用户手机）。

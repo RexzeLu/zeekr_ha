@@ -27,9 +27,37 @@
 
 ---
 
-## 1. 方案 A（推荐）：抓用户自己手机的流量（免 root）
+## 0.5 方案 0（人在外面也能做）：手机自带抓包 App，**不需要电脑、不需要同一网络**
 
-已就绪的本机参数：
+适用于「用户不在家 / 只想用手机」的场景。走 VPN 模式，**手机用自己的流量也能抓**。
+
+1. 手机装一个支持 VPN 模式抓包的 App（**Reqable**、HttpCanary/小黄鸟 同类皆可）。
+2. 首次启动会引导**安装它的 CA 证书**（装成「VPN 和应用」/用户证书即可）——
+   本 App 大概率够用，因为车控段走 SNC SDK 的 `TrustAllCerts`。
+3. 开始抓包 → 打开极氪 App → **做一次车控（闪灯 / 锁车）**。
+4. 在抓包列表里找 **`snc-tsp-api.zeekrlife.com`** 的请求（车控那一条），点进去。
+5. **截图给我这三样**：
+   - **请求头**（要能看到完整的 `Authorization`、`X-APP-ID`、`X-VIN` 及其它 `X-*`）；
+   - **请求体**（那段 JSON）；
+   - 请求行（`POST` + 完整路径）。
+
+> 我需要的就是「App 到底带了什么」。拿到 `Authorization` 我就能解出它的 `azp`/`scope`，
+> 与我们的 `user_center_client_phone` / `""` 一对比，答案立刻出来。
+
+---
+
+## 1. 方案 A（推荐，人在家时用）：抓用户自己手机的流量（免 root）
+
+**一键启动（推荐）**：
+
+```bash
+cd /d/zeekr_ha
+C:/Users/rexze/.workbuddy/binaries/python/versions/3.13.12/python.exe tools/zeekr_capture_start.py
+# 若 App 其它模块严格校验证书，改用只代理极氪域名：  ... --zeekr-only
+```
+
+脚本会自动检测本机局域网 IP、绑定并启动代理、把手机侧步骤连 IP 一起打印出来。
+以下参数表供手工操作时对照：
 
 | 项 | 值 |
 | --- | --- |
