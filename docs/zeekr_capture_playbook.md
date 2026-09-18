@@ -9,6 +9,16 @@
 
 ## 0. 先决条件（选定后不要再犹豫）
 
+> **⚠️ 绝对不要把账号登进模拟器**：GW1 JWT 里 `accountLoginInfoDTO.logoutOtherDevices = true`
+> 已被实测确认 ⇒ **模拟器一登录，用户手机上的 App 立刻被顶下线**。
+> 本场景必须**直接抓用户自己手机上的流量**。
+>
+> **好消息**：SNC SDK 自带 `TrustAllCerts`
+> （`com/geely/snc/network/http/auth/TrustAllCerts`、
+> `com/zeekr/snc/vehicle/core/net/http/auth/TrustAllCerts`，均为 **[dex]** 确认）
+> ⇒ 车控请求**很可能不校验证书**，因此**不需要 root、也不需要去证书固定**。
+> 用户级 CA 大概率就够。
+
 | 项 | 说明 |
 | --- | --- |
 | 用哪个账号 | **`16620192335`**（HA 那个号）。它**不是**你主力机上的账号 ⇒ 抓包不会打扰你日常使用；代价是期间 HA 的车控会话被顶掉，随时可恢复。 |
@@ -17,10 +27,43 @@
 
 ---
 
-## 1. 方案 A（推荐，成功率最高）：Android 模拟器 + mitmproxy
+## 1. 方案 A（推荐）：抓用户自己手机的流量（免 root）
 
-模拟器**天生可 root、系统分区可写**，能把 mitmproxy 的 CA 装成**系统级证书**——
-这是关键，因为 Android 7+ 的 App 默认不信任用户证书。
+已就绪的本机参数：
+
+| 项 | 值 |
+| --- | --- |
+| 抓包主机 IP | **192.168.6.21** |
+| 代理端口 | **8080** |
+| CA 证书（给 Android 装） | `C:\Users\rexze\.mitmproxy\mitmproxy-ca-cert.cer` |
+| 抓包输出 | `D:/zeekr_ha/capture/zeekr.flow` |
+| mitmdump 可执行 | `C:/Users/rexze/.workbuddy/binaries/python/envs/mitm/Scripts/mitmdump.exe` |
+
+步骤：
+
+1. **手机与电脑连同一个 WiFi**（网段 `192.168.6.x`）。
+2. **手机设置代理**：WLAN → 当前网络 → 代理 → 手动
+   - 主机名 `192.168.6.21`，端口 `8080`，保存。
+3. **手机装 CA**：手机浏览器打开 **`http://mitm.it`** → 选 Android →
+   下载证书（或直接把 `mitmproxy-ca-cert.cer` 传进手机安装）→
+   设置 → 安全 → 从存储设备安装 → 选 **`VPN 和应用`**（用户证书即可）。
+4. 打开极氪 App，确认能正常用车（说明代理链路通）。
+5. **做一次车控动作**（闪灯 / 锁车）。
+6. 停止抓包（我这边停 mitmdump 即可），然后我用
+   `tools/zeekr_capture_triage.py` 解析。
+
+> 若第 4 步 App 报网络错误：说明它对该域名确实做了校验。
+> 先试**只对 `snc-tsp-api.zeekrlife.com` 走代理**（用 mitmproxy 的 `--allow-hosts`），
+> 因为车控那一段是 SNC SDK 发的（TrustAllCerts），而 App 其它模块可能严格校验。
+
+---
+
+### 存档：Android 模拟器方案（**本场景不适用**）
+
+模拟器天生可 root、系统分区可写，能把 mitmproxy 的 CA 装成**系统级证书**
+（`-writable-system` + `adb root` + `adb remount` + 按 `<hash>.0` 命名推入
+`/system/etc/security/cacerts`）。但如 §0 所述，**登录模拟器会顶掉用户手机**，
+所以只在「账号可以随便顶掉」时使用。
 
 ### 1.1 起模拟器（Windows）
 
