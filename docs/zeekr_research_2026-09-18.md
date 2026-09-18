@@ -645,3 +645,99 @@ base / base+all-extra / base+tenant+tsp / base+vehicle / base+tenant+tsp+vehicle
   - **② 手机端抓包 App（Reqable 等，VPN 模式）** → 换一种抓包实现，规避 mitmproxy 被识别/协商失败；
   - **③ 若都不行**：控车路线在当前条件下**不可得**（除非有 root 设备或 ARM 环境可动态提取）。
     此时应把精力转回「已通的只读能力」交付。
+
+---
+
+# 2026-09-18 晚：开源生态突破 —— 静态提取 6 密钥 + 找到海外版完整认证链
+
+## 一、决定性发现：这个问题社区已经解决过
+
+检索公开资料后找到三个直接相关的项目（**说明我们的方向从"逆向猜"变成"照抄已验证的实现"**）：
+
+| 项目 | 价值 |
+| --- | --- |
+| **`wysie/zeekr_key_extractor`** | 从极氪 APK **静态提取 6 个密钥**的成体工具；**支持 `--region CN`**；新版密钥位于 **`libenv.so` 明文表**（纯静态可提，无需 root/模拟器/frida） |
+| **`sunshijiang/zeekr_homeassistant_sun`** | 一个**已支持中国大陆短信登录**的 HA 集成；用 `hmac_access_key`+`hmac_secret_key`，`X-API-SIGNATURE-VERSION: 2.1`，主机 `api-gw-toc.zeekrlife.com` |
+| **`nikagl/zeekr_ev_api`** | 海外版 API 库（PyPI `zeekr-ev-api`）；含 **`zeekr_app_sig.py`（X-SIGNATURE 权威实现）** 与 **`zeekr_hmac.py`（X-HMAC 实现）** |
+
+## 二、6 个密钥已成功提取（无 root、无模拟器）
+
+在**我们手上的中国版 APK** 上运行（`--region CN`）：
+
+```bash
+python zeekr_extract_secrets.py "C:/Users/rexze/Documents/OPPO 互联/极氪.apk" --region CN
+# => All 6 secrets extracted successfully!
+```
+
+结果落盘 `C:/Users/rexze/Documents/OPPO 互联/zeekr_secrets.json`：
+
+```
+hmac_access_key    = 7dbae691d53f4f3c9fab905368370d80
+hmac_secret_key    = hnpigl1f13fcb6a3ac834895b9e403c08cd895ce
+password_public_key= MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDENksAVqDoz5SMCZq0bsZwE+I3NjrANyTTwUVSf1+...
+prod_secret        = 03d1cd020062469e90ed63416c5c0fda   （另有 ~120 个候选）
+vin_key            = 2014052600006128
+vin_iv             = aebd1811194e82d9
+```
+
+与集成现有常量对比（**都不同**）：
+
+| 用途 | 集成现有 | 提取值 |
+| --- | --- | --- |
+| X-SIGNATURE 密钥 | `_SNC_SECRET = 890efe3207af95348b95f66b2ee7da04` | `prod_secret = 03d1cd020062469e90ed63416c5c0fda` |
+| VIN 加密 | `_AES_KEY=a01a6db985a2f5d4` / `_AES_IV=ed446b8b8845013d` | `vin_key=2014052600006128` / `vin_iv=aebd1811194e82d9` |
+
+依赖：`capstone 5.0.7` + `pyelftools`（已装入 default venv）。
+
+## 三、找到海外版完整认证链（`zeekr_ev_api` 实证）
+
+```
+1) 邮箱密码登录        → 用户中心 token
+2) GET  user/tspCode                     → tspCode
+3) POST ms-user-auth/v1.0/auth/login     → bearer accessToken
+        {identifier: tspCode, identityType: 10, loginDeviceId, ...}
+4) 用 bearer token 调 ms-vehicle-status / ms-remote-control / ms-charge-manage ...
+```
+
+关键点：**中国区集成用的 `identityType: 5` 是「用户中心手机号」令牌，而能调 `ms-*` 的是 `identityType: 10` 的 bearer 令牌**（用 tspCode 换）。
+且海外版的业务调用头是 `X-APP-ID: ZEEKRCNCH001M0001` + `X-PROJECT-ID: ZEEKR_SEA` + `X-API-SIGNATURE-VERSION: 2.0`；
+**登录用另一套 `DEFAULT_HEADERS`**：`app-code: 32816dbd-...`、`client-id: 1JwLroFkFFIpgFGdTRrm4_nzkkwDkfHj7RxJQb7J8tc`、`appsecret: zeekr_tis`、`appid: TSP`、`msgappid: 11002`。
+
+## 四、本轮实测（全部只读，未做任何车控写操作）
+
+| 测试 | 结果 | 结论 |
+| --- | --- | --- |
+| **`GET /zeekrlife-app-user/v1/user/tspCode`（GW1）** | **`000009 检测到您的账号在多个设备登录，请重新登录`** | **路由真实存在！**（此前认为"中国区无此路由"是**错误结论**，我们当时试的是别的前缀）。000009 说明会话被顶 |
+| `snc-tsp-api` 上 `user/tspCode` 等 6 条候选 | `00A01 404` | 不在 GW3 |
+| `/ms-user-auth/v1.0/user/tspCode`（GW3） | `079026 请求不在可访问地址范围` | 路由存在，区域受限 |
+| `identityType=10` + identifier∈{空, JWT, openId, 手机号, GW3 token} | **全部 `015013 登录权限校验不正确`** | 10 需要**真实 tspCode**，不是随便填（此前"identityType 只有 5 可用"的结论需修正为"**5 可用是因为参数齐，10 缺 tspCode**"） |
+| 对照 `identityType=5` | `000000 ok` + 拿到令牌 | 基线正常 |
+| HMAC 头（`X-HMAC-*`）+ CN 密钥打 GRIC / GW1 | GRIC `404`；`api-gw-toc` **`401`** | **HMAC 体系不是我们这两个网关的签名方式** |
+| 用 `vin_key/vin_iv` 与 `_AES_KEY/_AES_IV` **解密** App 的 `x-vehicle-identifier` | 两套都得乱码（CBC/ECB/互换均试） | `x-vehicle-identifier` **不是简单 AES(VIN)**（可能含盐/复合串，或第三套密钥） |
+| `x-signature` 2.1 **全天量爆破** | `ALLOWED_HEADERS` / `+CN 扩展` / `x_only` / `CN_only` × 12 变体 × **786,079** 候选 ≈ 全部未命中 | GRIC 的签名密钥**不在 APK 明文字符串池**（`libEncryptorP.so` 加密封装），静态不可得 |
+| DNS：中国区网关候选 | `cn-snc-tsp-api-gw.*` / `cn-snc-tsp-api.*` **均不解析**；`snc-tsp-api.zeekrlife.com` = 121.43.28.50 正常 | **中国区就是无前缀的 `snc-tsp-api.zeekrlife.com`** |
+
+## 五、下一步（需要一次有效会话，故需用户配合）
+
+新增一键脚本 `tools/zeekr_bearer_chain.py`：
+
+```bash
+# 1) 发验证码（用户收到短信）
+python tools/zeekr_bearer_chain.py --send-sms --phone 16620192335
+# 2) 带验证码跑完整链路
+python tools/zeekr_bearer_chain.py --phone 16620192335 --code <6位码>
+```
+
+脚本会依次执行：GW1 手机登录 → 提取 JWT → `tspCode` → `identityType:10` 换 bearer → 用 bearer 探 5 个只读接口，
+并打印每步原始返回。**判据：任一接口从 `079001` 变为 `000000`/参数级错误 ⇒ 链路成立。**
+
+⚠️ **约束**：一个账号只能在线一个设备。跑脚本期间**请勿在手机上打开极氪 App**（会互相顶），否则链路会在中途断掉。
+
+## 六、待验证事项（更新）
+
+1. **`tspCode` 的获取是否只需 GW1 JWT**：需一次有效登录验证（当前 000009 是因会话被顶）。
+2. `identityType: 10` 在中国区是否需要**额外的客户端头**（`app-code`/`client-id`/`appsecret`）——海外版带、我们从未带。
+3. 中国区的 `X-PROJECT-ID` 取值（`ZEEKR` / `ZEEKR_CN` / `ZEEKR_SEA`）未知。
+4. `x-vehicle-identifier` 的真实构造（非简单 AES(VIN)）。
+5. GRIC 的 `x-signature` 密钥（静态不可得；若 GW3+bearer 链路成立则**不再需要**）。
+6. 若 GW3+bearer 链路仍不通，备选是 `sunshijiang` 的 HMAC 路线（需先确认其端点是否真可用——该项目的 CN 端点路径是**猜的**，靠 3×3 穷举撞成功）。
