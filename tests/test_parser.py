@@ -445,3 +445,44 @@ def test_ac_target_temperature_is_not_read_from_the_cloud():
     data = parser.normalize_vehicle_data(payload, {"vin": VIN_X})
 
     assert data["climate"]["target_temp"] is None
+
+
+def test_seat_heat_reads_the_level_field_the_car_actually_sends():
+    """Seat heat arrives as ``*HeatLv``, not the ``*HeatSts`` we looked for.
+
+    Every seat heater therefore read as *unknown* on a real car: the aliases
+    only ever listed a status field the platform never sends.
+    """
+    payload = {
+        "data": {
+            "climateStatus": {
+                "drvHeatLv": "2",
+                "passHeatLv": "3",
+                "rlHeatLv": "0",
+                "rrHeatLv": "0",
+            }
+        }
+    }
+    data = parser.normalize_vehicle_data(payload, {"vin": VIN_X})
+
+    assert data["seats"]["heat"]["fl"] == 2
+    assert data["seats"]["heat"]["fr"] == 3
+    assert data["seats"]["heat"]["rl"] == 0
+    assert data["seats"]["heat"]["rr"] == 0
+
+
+def test_seat_vent_level_is_kept_when_no_status_field_is_sent():
+    """Ventilation reports a level and no status on this platform.
+
+    ``drvVentDetail`` is present, ``drvVentSts`` never is.  Keying off the
+    status alone left ventilation permanently at "off".
+    """
+    payload = {
+        "data": {
+            "climateStatus": {"drvVentDetail": "2", "passVentDetail": "0"}
+        }
+    }
+    data = parser.normalize_vehicle_data(payload, {"vin": VIN_X})
+
+    assert data["seats"]["vent"]["fl"]["sts"] is None
+    assert data["seats"]["vent"]["fl"]["level"] == 2

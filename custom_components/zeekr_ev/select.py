@@ -23,13 +23,19 @@ OPTION_TO_LEVEL = {OPTION_OFF: 0, OPTION_1: 1, OPTION_2: 2, OPTION_3: 3}
 LEVEL_TO_OPTION = {level: option for option, level in OPTION_TO_LEVEL.items()}
 
 # (entity key, name, ZAF service code, mode, position)
+#
+# The names share a 座椅 *prefix* on purpose.  Home Assistant lists a device's
+# entities alphabetically by name and offers no way to set their order, so the
+# name is the only lever there is.  Without the shared prefix these six were
+# scattered between unrelated controls (充电…, 除霜…, 车窗…) because their
+# first characters sort all over the place.
 SEAT_SPECS = (
-    ("seat_heat_driver", "主驾座椅加热", "SH.11", "heat", "fl"),
-    ("seat_heat_passenger", "副驾座椅加热", "SH.19", "heat", "fr"),
-    ("seat_heat_rear_left", "左后座椅加热", "SH.21", "heat", "rl"),
-    ("seat_heat_rear_right", "右后座椅加热", "SH.29", "heat", "rr"),
-    ("seat_vent_driver", "主驾座椅通风", "SV.11", "vent", "fl"),
-    ("seat_vent_passenger", "副驾座椅通风", "SV.19", "vent", "fr"),
+    ("seat_heat_driver", "座椅 · 主驾加热", "SH.11", "heat", "fl"),
+    ("seat_heat_passenger", "座椅 · 副驾加热", "SH.19", "heat", "fr"),
+    ("seat_heat_rear_left", "座椅 · 左后加热", "SH.21", "heat", "rl"),
+    ("seat_heat_rear_right", "座椅 · 右后加热", "SH.29", "heat", "rr"),
+    ("seat_vent_driver", "座椅 · 主驾通风", "SV.11", "vent", "fl"),
+    ("seat_vent_passenger", "座椅 · 副驾通风", "SV.19", "vent", "fr"),
 )
 
 
@@ -80,15 +86,17 @@ class ZeekrSeatSelect(ZeekrEntity, SelectEntity):
         if not isinstance(vent, dict):
             return 0
         sts = vent.get("sts")
-        level = vent.get("level")
-        if sts == 2:  # off
+        if sts == 2:  # an explicit "off" wins over whatever level is left over
             return 0
-        if sts == 1:
-            try:
-                return int(level) if level is not None else 0
-            except (TypeError, ValueError):
-                return 0
-        return 0
+        # Plenty of payloads carry the level and no status at all — this car
+        # reports ``drvVentDetail`` but never ``drvVentSts``.  Keying off the
+        # status alone therefore pinned ventilation to 关闭 forever even while
+        # it was running, so fall back to the level whenever the status is
+        # absent (or anything other than "off").
+        try:
+            return int(vent.get("level") or 0)
+        except (TypeError, ValueError):
+            return 0
 
     @property
     def current_option(self) -> str:

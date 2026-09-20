@@ -459,10 +459,19 @@ _ALIAS = {
     "window_pos": ("winPos", "windowPosition", "winPosition",
                    "windowOpenPercent"),
     # seats (heat level 0-3; vent comes as a status + detail pair)
-    "seat_heat_fl": ("drvHeatSts", "driverHeatStatus", "seatHeatDriver"),
-    "seat_heat_fr": ("passHeatingSts", "passHeatSts", "passengerHeatStatus"),
-    "seat_heat_rl": ("rlHeatingSts", "rearLeftHeatSts", "seatHeatRearLeft"),
-    "seat_heat_rr": ("rrHeatingSts", "rearRightHeatSts", "seatHeatRearRight"),
+    #
+    # The ``*HeatLv`` spellings come first because they are what this platform
+    # actually sends: the status payload carries ``drvHeatLv`` / ``passHeatLv`` /
+    # ``rlHeatLv`` / ``rrHeatLv``.  The ``*HeatSts`` aliases below never matched
+    # anything, which left every seat heater reading as unknown.
+    "seat_heat_fl": ("drvHeatLv", "drvHeatSts", "driverHeatStatus",
+                     "driverHeatLevel", "seatHeatDriver"),
+    "seat_heat_fr": ("passHeatLv", "passHeatingSts", "passHeatSts",
+                     "passengerHeatStatus", "passengerHeatLevel"),
+    "seat_heat_rl": ("rlHeatLv", "rlHeatingSts", "rearLeftHeatSts",
+                     "seatHeatRearLeft"),
+    "seat_heat_rr": ("rrHeatLv", "rrHeatingSts", "rearRightHeatSts",
+                     "seatHeatRearRight"),
     "seat_vent_fl_sts": ("drvVentSts", "driverVentStatus"),
     "seat_vent_fl_level": ("drvVentDetail", "driverVentLevel"),
     "seat_vent_fr_sts": ("passVentSts", "passengerVentStatus"),
