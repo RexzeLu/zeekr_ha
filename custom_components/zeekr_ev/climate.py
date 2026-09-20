@@ -22,6 +22,13 @@ from .entity import VehicleEntityManager, ZeekrEntity
 
 _LOGGER = logging.getLogger(__name__)
 
+# The range the climate entity offers.  It is *not* the range the car accepts:
+# the App happily sets 31 °C, and a hard 30 °C ceiling silently clamped the
+# car's own setpoint (and blocked it in the UI).  The entity therefore widens
+# itself to cover whatever the car reports -- see ``min_temp`` / ``max_temp``.
+BASE_MIN_TEMP = 16.0
+BASE_MAX_TEMP = 30.0
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -46,8 +53,8 @@ class ZeekrClimate(ZeekrEntity, ClimateEntity, RestoreEntity):
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
     _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT_COOL]
-    _attr_min_temp = 16.0
-    _attr_max_temp = 30.0
+    _attr_min_temp = BASE_MIN_TEMP
+    _attr_max_temp = BASE_MAX_TEMP
     _attr_target_temperature_step = 0.5
     _attr_icon = "mdi:air-conditioner"
 
@@ -76,22 +83,46 @@ class ZeekrClimate(ZeekrEntity, ClimateEntity, RestoreEntity):
         except (TypeError, ValueError):
             return None
 
+    def _reported_target(self) -> float | None:
+        """The setpoint the car itself reports, ``None`` when it has none.
+
+        The cloud does hold it (``currentTemperature``), but answers ``"0.0"``
+        whenever the AC is off — which the parser maps to ``None`` rather than
+        to a 0 °C setpoint.
+        """
+        reported = self.get("climate", "target_temp")
+        try:
+            return float(reported) if reported is not None else None
+        except (TypeError, ValueError):
+            return None
+
     @property
     def target_temperature(self) -> float | None:
         """Prefer the setpoint the car reports, fall back to the last one used.
 
-        The cloud does hold it (``currentTemperature``), but answers ``"0.0"``
-        whenever the AC is off — and reading straight from local state instead
-        made the entity show its own stale default while the app showed the real
-        setpoint.
+        Reading straight from local state instead made the entity show its own
+        stale default while the app showed the real setpoint.
         """
-        reported = self.get("climate", "target_temp")
-        try:
-            if reported is not None:
-                return float(reported)
-        except (TypeError, ValueError):
-            pass
+        reported = self._reported_target()
+        if reported is not None:
+            return reported
         return self._attr_target_temperature
+
+    @property
+    def min_temp(self) -> float:
+        """Widen the floor if the car reports a setpoint below it."""
+        reported = self._reported_target()
+        if reported is not None and reported < BASE_MIN_TEMP:
+            return reported
+        return BASE_MIN_TEMP
+
+    @property
+    def max_temp(self) -> float:
+        """Widen the ceiling if the car reports a setpoint above it (31 °C)."""
+        reported = self._reported_target()
+        if reported is not None and reported > BASE_MAX_TEMP:
+            return reported
+        return BASE_MAX_TEMP
 
     @property
     def hvac_mode(self) -> HVACMode | None:
@@ -108,7 +139,18 @@ class ZeekrClimate(ZeekrEntity, ClimateEntity, RestoreEntity):
         number that decides when — and it is otherwise only visible on the
         separate number entity.
         """
-        return {"duration_minutes": self.coordinator.ac_duration}
+        attributes: dict[str, Any] = {
+            "duration_minutes": self.coordinator.ac_duration,
+            # Which of the two sources the setpoint came from.  When the car
+            # stops reporting one, the entity falls back to its own memory and
+            # this says so, instead of the value just silently freezing.
+            "car_target_temp": self._reported_target(),
+        }
+        if self._reported_target() is None:
+            attributes["target_temp_source"] = "local"
+        else:
+            attributes["target_temp_source"] = "car"
+        return attributes
 
     # -- commands ---------------------------------------------------------
 
@@ -117,7 +159,10 @@ class ZeekrClimate(ZeekrEntity, ClimateEntity, RestoreEntity):
             await self.coordinator.async_set_climate(
                 self.vin,
                 enabled=True,
-                temperature=self._attr_target_temperature,
+                # Whatever is on display, not the entity's own default: the
+                # car holds its own setpoint, and sending the default instead
+                # overwrote whatever had been set from the app.
+                temperature=self.target_temperature,
                 # Whatever the number entity holds; the option default if never
                 # touched.  The car ends pre-conditioning by itself when it runs out.
                 duration=self.coordinator.ac_duration,
