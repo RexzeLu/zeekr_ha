@@ -70,7 +70,7 @@ from .const import (
     STORAGE_GRIC_ACCESS_TOKEN,
     STORAGE_GRIC_REFRESH_TOKEN,
 )
-from .parser import extract_vehicle_meta, normalize_vehicle_data
+from .parser import extract_vehicle_meta, normalise_key, normalize_vehicle_data
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -133,6 +133,49 @@ _REFRESH_MARGIN_SECONDS = 24 * 3600.0
 # A fresh refresh token stays valid for 30 days and every rotation resets that,
 # so this is only a sanity bound for the "is it worth trying" decision.
 _REFRESH_TOKEN_LIFETIME = 30 * 24 * 3600
+
+# How long an auxiliary ("extras") payload is reused before it is fetched
+# again — ``(idle seconds, seconds while the car is charging)``.
+#
+# A poll used to fire three requests every time: status, then these two.  But
+# the status payload already carries the live charging state (``chargeSts``,
+# ``chargerState``, ``statusOfChargerConnection``, voltage/current and
+# ``timeToFullyCharged``) — verified against a real capture — so the extras only
+# add what the status leaves out, and those change far more slowly than the
+# status does.  Charging is the one situation where they move, hence the second
+# column; a car that is plugged in and charging gets the short interval.
+_EXTRAS_TTL = {
+    "chargingStatus": (300.0, 60.0),   # 5 min idle / 1 min while charging
+    "chargingLimit": (1800.0, 300.0),  # 30 min idle — it is a *setting*
+}
+
+# Leaves that say whether the car is taking charge, used only to pick the TTL
+# column above.  A miss is harmless: it just leaves the longer TTL in place.
+_CHARGING_KEYS = frozenset(
+    {"chargests", "chargerstate", "statusofchargerconnection", "dcchargests"}
+)
+_IDLE_CHARGING_VALUES = frozenset({"", "0", "false", "none", "null"})
+
+
+def is_charging(raw: Any) -> bool:
+    """Best-effort read of "is the car taking charge right now" from a payload.
+
+    Used only to shorten the extras cache while charging, so a wrong answer
+    costs a stale aux value for a few minutes — never a wrong entity.
+    """
+    stack: list[Any] = [raw]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if normalise_key(key) in _CHARGING_KEYS:
+                    if str(value).strip().lower() not in _IDLE_CHARGING_VALUES:
+                        return True
+                if isinstance(value, (dict, list)):
+                    stack.append(value)
+        elif isinstance(node, list):
+            stack.extend(node)
+    return False
 
 
 # --------------------------------------------------------------------------
@@ -286,6 +329,8 @@ class ZeekrGricApiClient:
         self._command_attempts: list[dict[str, Any]] = []
         self._last_error: str | None = None
         self._token_log: list[dict[str, Any]] = []
+        # (vin, extras key) -> (stored_at, payload).  See _EXTRAS_TTL.
+        self._extras_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 
     # -- token / configuration persistence --------------------------------
 
@@ -676,12 +721,19 @@ class ZeekrGricApiClient:
             return True, ""
         return False, _result_brief(result)
 
-    async def _extras(self, vin: str) -> dict[str, Any]:
+    async def _extras(self, vin: str, charging: bool = False) -> dict[str, Any]:
         """Auxiliary payloads the normaliser looks for but status omits.
 
         Mirrors ``ZeekrSmsApiClient._gw3_extras``: charging status and the SOC
         limit live under their own services on both channels.
+
+        Both are cached — see :data:`_EXTRAS_TTL`.  A poll re-reads the status
+        every time, but the status already reports whether the car is charging,
+        voltage/current and time-to-full, so these two were being fetched at the
+        same rate for values that barely move.  A failed or empty refresh keeps
+        serving the last good payload rather than dropping the field.
         """
+        now = time.monotonic()
         extras: dict[str, Any] = {}
         for key, path, query in (
             ("chargingStatus",
@@ -691,19 +743,45 @@ class ZeekrGricApiClient:
              "/ms-charge-manage/api/v1.0/charge/getLatestSoc",
              {"vin": vin, "tspPlatform": _PLATFORM}),
         ):
+            cache_key = (vin, key)
+            cached = self._extras_cache.get(cache_key)
+            ttl = _EXTRAS_TTL[key][1 if charging else 0]
+            if cached is not None and now - cached[0] < ttl:
+                extras[key] = cached[1]
+                continue
             try:
                 result = await self._get(self._tsp_host(vin), path, query)
                 data = _payload_of(result)
                 if isinstance(data, dict) and data:
+                    self._extras_cache[cache_key] = (now, data)
                     extras[key] = data
+                    continue
             except Exception as exc:  # noqa: BLE001 - extras are optional
                 _LOGGER.debug("GRIC %s 获取失败（%s）: %s", key, vin, exc)
+            if cached is not None:
+                extras[key] = cached[1]
         return extras
+
+    def invalidate_extras(self, vin: str | None = None) -> None:
+        """Drop cached aux payloads so the next poll re-reads them.
+
+        Called after a charge command: the SOC limit is a *setting*, and a
+        cached one would keep showing the old number long after the car took
+        the new value.
+        """
+        if vin is None:
+            self._extras_cache.clear()
+            return
+        for cache_key in [k for k in self._extras_cache if k[0] == vin]:
+            del self._extras_cache[cache_key]
 
     async def _fetch_raw_status(self, vin: str) -> dict[str, Any]:
         raw = await self.get_vehicle_status_gric(vin)
         if raw:
-            for key, value in (await self._extras(vin)).items():
+            # The status itself says whether the car is charging, which decides
+            # how long the aux payloads below may be reused.
+            charging = is_charging(raw)
+            for key, value in (await self._extras(vin, charging)).items():
                 raw.setdefault(key, value)
             self._status_source[vin] = "gric"
         return raw
@@ -786,6 +864,11 @@ class ZeekrGricApiClient:
             raise ZeekrApiError(
                 f"GRIC 拒绝了指令 {service_id}：{_result_brief(result)}"
             )
+        # ``RCS`` writes the charging limit — which is cached for up to 30
+        # minutes.  Without this the entity would show the old value until the
+        # cache expired, i.e. the command would look like it had no effect.
+        if service_id == "RCS":
+            self.invalidate_extras(vin)
         return {**result, "gateway": "gric"}
 
     async def _require_access_token(self) -> None:

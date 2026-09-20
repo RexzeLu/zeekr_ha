@@ -694,3 +694,108 @@ def test_gateway_summary_never_exposes_tokens():
     assert "SECRET-A" not in summary
     assert "SECRET-R" not in summary
     assert summary.count("IDENT") == 0
+
+
+_STATUS_ROUTE = "/ms-vehicle-status/api/v2.0/vehicle/status/latest"
+_QRVS_ROUTE = "/ms-vehicle-status/api/v1.0/vehicle/status/qrvs"
+_SOC_ROUTE = "/ms-charge-manage/api/v1.0/charge/getLatestSoc"
+
+
+class _PathSession:
+    """Answers by URL substring and remembers how often each path was hit."""
+
+    def __init__(self, bodies):
+        self._bodies = bodies
+        self.calls: list[dict] = []
+
+    def request(self, method, url, **kwargs):
+        self.calls.append({"method": method, "url": url, **kwargs})
+        for needle, body in self._bodies.items():
+            if needle in url:
+                return _FakeRequest(_FakeResponse(copy.deepcopy(body)))
+        return _FakeRequest(_FakeResponse({"code": "0", "data": {}}))
+
+    def count(self, needle):
+        return sum(1 for call in self.calls if needle in call["url"])
+
+
+def _polling_client(bodies):
+    """A client whose access token is fresh for the next seven days."""
+    session = _PathSession(bodies)
+    client = gric.ZeekrGricApiClient(session)
+    client.store_tokens({
+        gric.STORAGE_GRIC_ACCESS_TOKEN: _jwt(int(time.time()) + 7 * 24 * 3600),
+        gric.STORAGE_GRIC_REFRESH_TOKEN: "R",
+    })
+    return client, session
+
+
+def _status_bodies():
+    return {
+        _STATUS_ROUTE: {"code": "0", "data": {"updateTime": "1789922460649"}},
+        _QRVS_ROUTE: {"code": "0", "data": {"chargingStatus": "0"}},
+        _SOC_ROUTE: {"code": "0", "data": {"soc": "950"}},
+    }
+
+
+def test_only_the_status_route_is_hit_on_every_poll():
+    """Charging status and the SOC limit must not ride along every time.
+
+    At a one-minute interval that would be ~4300 requests a day per car for two
+    values that barely move — and the status payload already reports whether
+    the car is charging, plus voltage/current/time-to-full.
+    """
+    client, session = _polling_client(_status_bodies())
+
+    first = asyncio.run(client._fetch_raw_status("VIN1"))
+    second = asyncio.run(client._fetch_raw_status("VIN1"))
+
+    assert session.count(_STATUS_ROUTE) == 2
+    assert session.count(_QRVS_ROUTE) == 1
+    assert session.count(_SOC_ROUTE) == 1
+    # Cached, but still merged in — the normaliser cannot tell the difference.
+    assert first.get("chargingLimit") == {"soc": "950"}
+    assert second.get("chargingLimit") == {"soc": "950"}
+
+
+def test_a_charge_command_invalidates_the_cached_soc_limit():
+    """The SOC limit is a *setting*; a cache must not outlive a write.
+
+    Otherwise the number entity keeps showing the old limit for up to half an
+    hour and the command looks like it did nothing.
+    """
+    client, session = _polling_client(_status_bodies())
+
+    asyncio.run(client._fetch_raw_status("VIN1"))
+    asyncio.run(client.async_do_remote_control(
+        "VIN1", "start", "RCS",
+        {"serviceParameters": [{"key": "soc", "value": "800"}]},
+    ))
+    asyncio.run(client._fetch_raw_status("VIN1"))
+
+    assert session.count(_SOC_ROUTE) == 2
+
+
+def test_a_stale_extras_entry_is_refreshed_on_the_next_poll():
+    client, session = _polling_client(_status_bodies())
+    asyncio.run(client._fetch_raw_status("VIN1"))
+
+    # Backdate the cache well past every TTL.
+    for key in list(client._extras_cache):
+        client._extras_cache[key] = (time.monotonic() - 10_000,
+                                     client._extras_cache[key][1])
+    asyncio.run(client._fetch_raw_status("VIN1"))
+
+    assert session.count(_QRVS_ROUTE) == 2
+    assert session.count(_SOC_ROUTE) == 2
+
+
+def test_is_charging_reads_the_status_payload():
+    """It only picks a TTL column, so an unknown payload must read as idle."""
+    assert gric.is_charging(
+        {"data": {"electricVehicleStatus": {"chargeSts": "1"}}}
+    ) is True
+    assert gric.is_charging(
+        {"data": {"electricVehicleStatus": {"chargeSts": "0"}}}
+    ) is False
+    assert gric.is_charging({}) is False

@@ -98,12 +98,12 @@ DRIVE_SIDE_LHD = "lhd"
 DRIVE_SIDE_RHD = "rhd"
 
 DEFAULT_NAME = DOMAIN
-# Five minutes made a change made in the phone app take up to five minutes to
-# reach Home Assistant, which reads as "the integration is broken".  Two is the
-# balance: worst-case lag halves, and the extra requests stay modest (each poll
-# costs three calls per vehicle).  One minute is available for anyone who wants
-# the floor; below that the car's own upload cadence becomes the bottleneck.
-DEFAULT_POLLING_INTERVAL = 2  # minutes
+# One minute — the floor the options allow, and what the phone-app sync delay
+# asked for.  It is affordable because the aux payloads are cached (see
+# ``api_gric._EXTRAS_TTL``): a poll is normally a *single* status request per
+# vehicle, ~1440 calls/day·car instead of the ~4320 it would cost if the
+# charging status and SOC limit were re-read every time.
+DEFAULT_POLLING_INTERVAL = 1  # minutes
 DEFAULT_REGION_CODE = "+86"
 DEFAULT_SEAT_DURATION = 15  # minutes
 DEFAULT_AC_DURATION = 15  # minutes
