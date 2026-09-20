@@ -21,8 +21,14 @@
     python tools/zeekr_gric_token.py show      # 只读：显示两条令牌的剩余有效期
     python tools/zeekr_gric_token.py refresh   # 轮换一次并持久化
     python tools/zeekr_gric_token.py ensure    # access 剩余 <24h 才刷（给定时任务用）
+    python tools/zeekr_gric_token.py form      # 导出 HA 配置表单要填的两个值（写到桌面）
+    python tools/zeekr_gric_token.py form --print        # 额外在终端打出明文
+    python tools/zeekr_gric_token.py form --ident <值>   # 顺手把按车标识存进令牌文件
 
-⚠️ 令牌只从本地文件读、打印一律脱敏。
+`form` 解决的是「用户自己去抓包根本拿不到值」：本机已经从 root 手机里取到过
+`refreshToken` 与 `x-vehicle-identifier`，`form` 把它们写成一份可直接复制粘贴的文件。
+
+⚠️ 令牌只从本地文件读、打印一律脱敏（`--print` 除外，那是你自己要看明文）。
 """
 from __future__ import annotations
 
@@ -49,6 +55,13 @@ PRIMARY = os.environ.get("ZEEKR_GRIC_TOKENS") or os.path.join(tempfile.gettempdi
 MIRROR = os.path.join("C:/Users/rexze/Documents/OPPO 互联", "zeekr_gric_tokens.json")
 
 ENSURE_WITHIN_H = 24.0
+
+# `form` 导出文件的默认落点：桌面最好找；没有桌面就退回 %TEMP%。
+_DESKTOP = os.path.join(os.path.expanduser("~"), "Desktop")
+FORM_OUT = os.environ.get("ZEEKR_GRIC_FORM_OUT") or os.path.join(
+    _DESKTOP if os.path.isdir(_DESKTOP) else tempfile.gettempdir(),
+    "zeekr_ha_表单填写.txt",
+)
 
 
 def red(s: str | None) -> str:
@@ -168,6 +181,61 @@ def refresh(d: dict) -> dict:
     return new
 
 
+def form(d: dict, out: str | None = None, print_plain: bool = False,
+         ident: str | None = None) -> str:
+    """导出 HA 配置表单（GRIC 通道）要填的两个值。
+
+    返回值是写出的文件路径。默认**不在终端打印明文**，只给脱敏预览，
+    因为 refreshToken 等价于账号的接入权。
+    """
+    if ident:
+        d["vehicle_identifier"] = ident.strip()
+        for p in save(d):
+            print(f"# 按车标识已存进 {p}")
+        d = load()
+
+    ref = (d.get("gric_refresh") or "").strip()
+    vehicle_ident = (d.get("vehicle_identifier") or "").strip()
+    missing = [name for name, value in (("refreshToken", ref),
+                                        ("x-vehicle-identifier", vehicle_ident)) if not value]
+    if missing:
+        raise SystemExit("✗ 令牌文件里缺少：" + "、".join(missing)
+                         + "\n  refreshToken 需从手机 App 登录态重新取（见 docs/zeekr_root_playbook.md）；"
+                           "\n  取到后用 `form --ident <值>` 把按车标识一起存下来。")
+
+    plate = d.get("plate") or "未知车牌"
+    vin = d.get("vin") or "未知 VIN"
+    text = "\n".join([
+        "极氪 HA 集成 —— GRIC 通道「添加集成」表单要填的两个值",
+        f"生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"车辆：{plate}  VIN {vin}",
+        "",
+        "【字段 1】refreshToken   →  粘贴到表单第一个框（整行复制，别带空格）",
+        ref,
+        "",
+        "【字段 2】x-vehicle-identifier   →  粘贴到表单第二个框",
+        vehicle_ident,
+        "",
+        "填完之后的注意事项：",
+        "  * 保存后 HA 会立刻用它换一对新令牌 —— 本机这份文件里的 refresh 随之作废，属正常现象。",
+        "  * 手机 App 别再登这个账号：同一会话只有一个持有者，两边会互相把对方顶下线。",
+        "  * 万一以后 HA 侧的令牌失效，需要回到手机上短信重登，再重新取一次这两个值。",
+        "",
+    ])
+
+    out = out or FORM_OUT
+    tmp = out + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, out)
+    print(f"# 已写出：{out}")
+    print(f"#   refreshToken           {red(ref)}")
+    print(f"#   x-vehicle-identifier   {vehicle_ident}")
+    if print_plain:
+        print("\n" + text)
+    return out
+
+
 def main() -> int:
     cmd = sys.argv[1] if len(sys.argv) > 1 else "show"
     if cmd == "show":
@@ -192,6 +260,20 @@ def main() -> int:
             return 0
         print()
         refresh(d)
+        return 0
+    if cmd == "form":
+        args = sys.argv[2:]
+        out = None
+        ident = None
+        print_plain = False
+        for i, arg in enumerate(args):
+            if arg == "--print":
+                print_plain = True
+            elif arg == "--out" and i + 1 < len(args):
+                out = args[i + 1]
+            elif arg == "--ident" and i + 1 < len(args):
+                ident = args[i + 1]
+        form(load(), out=out, print_plain=print_plain, ident=ident)
         return 0
     print(__doc__)
     return 2

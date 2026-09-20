@@ -115,19 +115,35 @@
 
 ### 如何取到 `refreshToken` 和 `x-vehicle-identifier`
 
-两个值都来自**同一台手机上、同一个能控车的 App 会话**：
+**先试这条（不用抓包）**：如果这台电脑上以前从 root 手机里取过一次，两个值都还存着，
+一条命令就能重新导出成一份可直接复制粘贴的文件：
+
+```bash
+python tools/zeekr_gric_token.py form          # 写到桌面 zeekr_ha_表单填写.txt
+python tools/zeekr_gric_token.py form --print  # 同时在终端打出明文
+```
+
+它会打印（并写文件）：`refreshToken` + `x-vehicle-identifier`，以及这两条令牌的剩余有效期。
+以后令牌轮换过、要重新添加集成时，再跑一次即可。
+
+**第一次取**：两个值都来自**同一台手机上、同一个能控车的 App 会话**。
 
 - **`refreshToken`**：App 本地存储里的登录态（`mmkv/MOD_LOGIN`，字段 `refreshToken`）。
-  有 root 的手机可直接读取；没有 root 则用 HTTP 代理抓包，从任意一条
-  `gric-api.geely.com` / `gric-zhf-api.geely.com` 请求里取（App 启动时的
-  `refresh/token` 请求体里就带着它）。
+  手机**已 root** ⇒ 不用抓包，`python tools/zeekr_device_pull.py` 走 adb 只读拉取再扫描
+  （不修改 App 数据、不触发重新登录，因此不会顶掉手机上的会话）；
+  没 root 就只能挂 HTTP 代理抓包，从任意一条 `gric-api.geely.com` /
+  `gric-zhf-api.geely.com` 请求里取（App 启动时的 `refresh/token` 请求体里就带着它）。
 - **`x-vehicle-identifier`**：抓包时看**任意一条按车请求**的同名请求头
-  （例如车况 `GET /ms-vehicle-status/api/v2.0/vehicle/status/latest`）。
-  它是长这样的一串：`xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=`。
-  把它连同 `refreshToken` 一起填进表单即可。
+  （例如车况 `GET /ms-vehicle-status/api/v2.0/vehicle/status/latest`），
+  长这样：`xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=`。
+  ⚠️ 它是网关侧密文，**离线算不出来**（静态文件里也没有），所以**必须**从请求头里原样取。
 
-> 本仓库的 `tools/zeekr_gric_verify.py` 是一个**只读探针**：给它这两样东西，
-> 它会在命令行里打印车辆列表 / 车况，用于验证取值是否正确（不会改动车端状态）。
+> 好消息是**只需要取一次**：`x-vehicle-identifier` 对一台车是固定值，
+> `refreshToken` 会轮换但集成会自动续期 —— 除非账号在别处（手机 App）重新登录，
+> 把这条令牌链顶掉，那时才需要重新取一次。
+
+> `tools/zeekr_gric_verify.py` 是一个**只读探针**：给它这两样东西，它会在命令行里
+> 打印车辆列表 / 车况，用来验证取值对不对（不会改动车端状态）。
 
 ## 选项（「配置 → 选项」）
 
