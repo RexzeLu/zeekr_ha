@@ -2,6 +2,13 @@
   "config": {
     "step": {
       "user": {
+        "title": "极氪账号接入方式",
+        "description": "请选择本配置项使用的登录通道。\n{detail}",
+        "data": {
+          "auth_method": "接入方式"
+        }
+      },
+      "phone": {
         "title": "极氪账号登录",
         "description": "请输入极氪 App 注册的手机号，我们会向该号码发送短信验证码。\n{detail}",
         "data": {
@@ -16,6 +23,14 @@
           "sms_code": "短信验证码"
         }
       },
+      "gric": {
+        "title": "GRIC 令牌接入",
+        "description": "适用于共享车 / 非车主账号（此类账号走短信通道会被网关拒绝）。\n请粘贴极氪 App 的 refreshToken；集成会用它自动续期，之后不再需要手机。\n注意：同一会话只有最后持有者有效，令牌轮换后 App 需要重新登录。\n{detail}",
+        "data": {
+          "gric_refresh_token": "refreshToken",
+          "vehicle_identifier": "车辆 x-vehicle-identifier（必填，见 README）"
+        }
+      },
       "reauth_confirm": {
         "title": "重新登录",
         "description": "{phone} 的登录凭据已失效，请重新获取验证码以继续。\n{detail}"
@@ -27,10 +42,14 @@
       "cannot_connect": "无法连接极氪服务：{detail}",
       "sms_failed": "验证码发送失败：{detail}",
       "invalid_auth": "登录失败：{detail}",
+      "gric_token_required": "请粘贴 refreshToken",
+      "gric_identifier_required": "请填写车辆的 x-vehicle-identifier（取法见 README）",
+      "gric_refresh_failed": "refreshToken 无效或被拒绝：{detail}",
+      "gric_identifier_failed": "车辆标识校验失败：{detail}",
       "unknown": "未知错误"
     },
     "abort": {
-      "already_configured": "该手机号已配置",
+      "already_configured": "该账号已配置",
       "reauth_successful": "重新登录成功"
     }
   },
@@ -44,7 +63,8 @@
           "seat_duration": "座椅加热/通风时长（分钟）",
           "ac_duration": "空调运行时长（分钟）",
           "steering_wheel_duration": "方向盘加热时长（分钟）",
-          "vehicle_token": "车辆 X-VIN 令牌（可选，取自 App 抓包）"
+          "vehicle_token": "车辆 X-VIN 令牌（短信通道，可选）",
+          "vehicle_identifier": "车辆 x-vehicle-identifier（GRIC 通道，必填）"
         }
       }
     }

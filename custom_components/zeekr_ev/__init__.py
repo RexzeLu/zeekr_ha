@@ -1,4 +1,15 @@
-"""The Zeekr EV integration — China mainland (SMS / +86) login only."""
+"""The Zeekr EV integration.
+
+Two authentication channels are supported and chosen per config entry:
+
+* **SMS (+86)** — the classic login against ``api-gw-toc.zeekrlife.com``.  This
+  is what the car's *owner* uses.
+* **GRIC** — seeded with the app's own refresh token (``gric-*.geely.com``),
+  which is the channel that works for an account the SNC gateway refuses, such
+  as a shared car (``isOwner: false``).
+
+Both clients expose the same surface, so the platforms never branch on it.
+"""
 
 from __future__ import annotations
 
@@ -17,13 +28,18 @@ from homeassistant.exceptions import (
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 
+from .api_gric import ZeekrGricApiClient
 from .api_sms import ZeekrSmsApiClient
 from .const import (
     ATTR_CONFIG_ENTRY_ID,
     ATTR_VIN,
+    AUTH_METHOD_GRIC,
+    CONF_AUTH_METHOD,
     CONF_PHONE,
     CONF_REGION_CODE,
+    CONF_VEHICLE_IDENTIFIER,
     CONF_VEHICLE_TOKEN,
+    DEFAULT_AUTH_METHOD,
     DOMAIN,
     PLATFORMS,
     SERVICE_DUMP_RAW,
@@ -35,6 +51,47 @@ from .coordinator import ZeekrCoordinator
 _LOGGER = logging.getLogger(__name__)
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+def _auth_method(entry: ConfigEntry) -> str:
+    """Which gateway this entry talks to.
+
+    Entries written before the channel existed carry no ``auth_method`` at all,
+    and those are SMS ones — the default is what keeps them loading unchanged.
+    """
+    return str(
+        entry.options.get(CONF_AUTH_METHOD)
+        or entry.data.get(CONF_AUTH_METHOD)
+        or DEFAULT_AUTH_METHOD
+    )
+
+
+def _build_client(session, entry: ConfigEntry
+                  ) -> ZeekrSmsApiClient | ZeekrGricApiClient:
+    """Instantiate the client for the entry's channel and seed it.
+
+    Both clients expose the same surface, so nothing downstream branches on the
+    channel — only this factory does.
+    """
+    if _auth_method(entry) == AUTH_METHOD_GRIC:
+        gric = ZeekrGricApiClient(session)
+        gric.store_tokens(entry.data)
+        # The app's per-vehicle ``x-vehicle-identifier``; without it the car can
+        # be listed but not read or driven (see api_gric).
+        gric.set_vehicle_identifier(
+            entry.options.get(CONF_VEHICLE_IDENTIFIER)
+            or entry.data.get(CONF_VEHICLE_IDENTIFIER)
+        )
+        return gric
+
+    sms = ZeekrSmsApiClient(session)
+    sms.store_tokens(entry.data)
+    # The platform's own per-vehicle X-VIN token, when the owner supplied one.
+    sms.set_vehicle_token(
+        entry.options.get(CONF_VEHICLE_TOKEN)
+        or entry.data.get(CONF_VEHICLE_TOKEN)
+    )
+    return sms
 
 
 def _account_key(entry: ConfigEntry) -> str | None:
@@ -136,13 +193,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.info(STARTUP_MESSAGE)
 
     session = async_get_clientsession(hass)
-    client = ZeekrSmsApiClient(session)
-    client.store_tokens(entry.data)
-    # The platform's own per-vehicle X-VIN token, when the owner supplied one.
-    client.set_vehicle_token(
-        entry.options.get(CONF_VEHICLE_TOKEN)
-        or entry.data.get(CONF_VEHICLE_TOKEN)
-    )
+    client = _build_client(session, entry)
 
     coordinator = ZeekrCoordinator(hass, client, entry)
     await coordinator.async_init_stats()

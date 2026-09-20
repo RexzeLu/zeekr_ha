@@ -2,6 +2,13 @@
   "config": {
     "step": {
       "user": {
+        "title": "Zeekr account access",
+        "description": "Choose the login channel this config entry should use.\n{detail}",
+        "data": {
+          "auth_method": "Login channel"
+        }
+      },
+      "phone": {
         "title": "Zeekr account login",
         "description": "Enter the phone number registered with the Zeekr app. An SMS verification code will be sent to it.\n{detail}",
         "data": {
@@ -16,6 +23,14 @@
           "sms_code": "SMS verification code"
         }
       },
+      "gric": {
+        "title": "GRIC token access",
+        "description": "For a shared car or a non-owner account, which the SMS channel's gateway refuses.\nPaste the refreshToken from the Zeekr app; the integration renews it automatically and never needs the phone again.\nNote: only the last holder of a session stays valid, so the app has to log in again after a rotation.\n{detail}",
+        "data": {
+          "gric_refresh_token": "refreshToken",
+          "vehicle_identifier": "Vehicle x-vehicle-identifier (required, see README)"
+        }
+      },
       "reauth_confirm": {
         "title": "Sign in again",
         "description": "The stored credentials for {phone} have expired. Request a new verification code to continue.\n{detail}"
@@ -27,10 +42,14 @@
       "cannot_connect": "Cannot reach the Zeekr service: {detail}",
       "sms_failed": "Could not send the verification code: {detail}",
       "invalid_auth": "Login failed: {detail}",
+      "gric_token_required": "Please paste the refreshToken",
+      "gric_identifier_required": "Please enter the vehicle's x-vehicle-identifier (see README)",
+      "gric_refresh_failed": "The refreshToken was rejected or has expired: {detail}",
+      "gric_identifier_failed": "Vehicle identifier rejected: {detail}",
       "unknown": "Unexpected error"
     },
     "abort": {
-      "already_configured": "This phone number is already configured",
+      "already_configured": "This account is already configured",
       "reauth_successful": "Signed in again successfully"
     }
   },
@@ -44,7 +63,8 @@
           "seat_duration": "Seat heating / ventilation duration (minutes)",
           "ac_duration": "Air conditioning duration (minutes)",
           "steering_wheel_duration": "Steering wheel heating duration (minutes)",
-          "vehicle_token": "Vehicle X-VIN token (optional, from the app's traffic)"
+          "vehicle_token": "Vehicle X-VIN token (SMS channel, optional)",
+          "vehicle_identifier": "Vehicle x-vehicle-identifier (GRIC channel, required)"
         }
       }
     }

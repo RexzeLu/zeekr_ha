@@ -31,6 +31,29 @@ CONF_ENABLE_COMMANDS = "enable_commands"
 # 令牌").  Empty = fall back to encrypting the VIN locally.
 CONF_VEHICLE_TOKEN = "vehicle_token"
 
+# ---------------------------------------------------------------------------
+# Authentication channel
+# ---------------------------------------------------------------------------
+# Which gateway the entry talks to.  The two are genuinely different products:
+# SNC (``snc-tsp-api.zeekrlife.com``, app id ``ZEEKRCNCH001M0001``) issues one
+# session per SMS login, while GRIC (``gric-*.geely.com``, app id
+# ``GEELYCNCH001M0001``) is the gateway the official app itself uses.
+#
+# The distinction matters for shared cars: the SNC gateway refuses every
+# vehicle interface for a non-owner account (``079001``), and no amount of
+# re-logging in changes that.  GRIC serves the same account fine.
+CONF_AUTH_METHOD = "auth_method"
+AUTH_METHOD_SMS = "sms"
+AUTH_METHOD_GRIC = "gric"
+DEFAULT_AUTH_METHOD = AUTH_METHOD_SMS
+
+# The app's own per-vehicle ``x-vehicle-identifier``.  The GRIC signature signs
+# it, and every per-vehicle route *decrypts* it — a wrong value is answered with
+# ``00A06 Decrypt X-VEHICLE-IDENTIFIER failed``.  So it is an encrypted form of
+# the car's identity rather than a random id, and since its construction is not
+# solved offline it is supplied by the owner (see README).
+CONF_VEHICLE_IDENTIFIER = "vehicle_identifier"
+
 # ``loginDeviceId`` is not a free-form id: the app sends a composite
 # ``{brand}-{model}-{sdkInt}-{osRelease}`` string, and the mobile SDK parses it
 # to describe the device a session belongs to.  A bare uuid is not that shape,
@@ -100,6 +123,12 @@ STORAGE_USER_ID = "user_id"
 STORAGE_CLIENT_ID = "client_id"
 STORAGE_NEW_ACCESS_TOKEN = "new_access_token"
 STORAGE_NEW_REFRESH_TOKEN = "new_refresh_token"
+
+# GRIC channel tokens.  Kept separate from the SNC ones above: the two are
+# independent sessions and an entry uses exactly one, so sharing a key would let
+# a value left over from the other channel be picked up as if it were valid.
+STORAGE_GRIC_ACCESS_TOKEN = "gric_access_token"
+STORAGE_GRIC_REFRESH_TOKEN = "gric_refresh_token"
 
 # Which build's login shape minted the stored tokens (see CREDENTIAL_REVISION).
 STORAGE_CREDENTIAL_REVISION = "credential_revision"

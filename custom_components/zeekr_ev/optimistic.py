@@ -26,7 +26,13 @@ import time
 from typing import Any
 
 #: How long a pending value may override the polled state.
-DEFAULT_TTL = 90.0
+#:
+#: Sized for the slowest channel rather than the fastest.  On GRIC a *lock*
+#: command took the full ~120 s to show up in the status payload (unlock showed
+#: up in ~5 s), so a window shorter than that would revoke the optimistic value
+#: while the car was still perfectly on its way to obeying — the UI would flick
+#: back to the old state and the command would look like it had failed.
+DEFAULT_TTL = 180.0
 
 _VIN = str
 _Path = tuple[str, ...]

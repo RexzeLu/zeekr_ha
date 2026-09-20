@@ -297,6 +297,22 @@ def _duration_minutes(value: Any) -> float | None:
     return minutes
 
 
+def _charge_limit(value: Any) -> float | None:
+    """Normalise the charge limit to a percentage.
+
+    The gateway reports it in tenths on some channels — GRIC answers ``950`` for
+    a 95 % limit — and in whole percent on others.  A limit can never exceed
+    100 %, so anything above that is scaled down rather than taken at face
+    value (``950 %`` in the UI is how this was found).
+    """
+    number = as_float(value)
+    if number is None:
+        return None
+    if number > 100:
+        number /= 10.0
+    return number
+
+
 def _percent(value: Any) -> float | None:
     """Coerce a 0..100 percentage, rejecting out-of-range readings.
 
@@ -665,7 +681,9 @@ _VEHICLE_ALIAS = {
               "plate"),
     "model": ("model", "modelName", "vehicleModel", "vehModel", "carType"),
     "series": ("series", "seriesName", "seriesCode", "vehicleSeries"),
-    "brand": ("brandName", "brand", "vehicleBrand"),
+    # ``brandCode`` is how the GRIC vehicle list names the brand ("ZEEKR");
+    # the SNC list uses ``brandName``.
+    "brand": ("brandName", "brand", "vehicleBrand", "brandCode"),
     "nickname": ("nickName", "nickname", "vehName", "vehicleName",
                  "carNickName", "vehicleNickName", "userVehicleName",
                  "displayName", "carName", "alias", "name"),
@@ -919,7 +937,7 @@ def normalize_vehicle_data(raw: Any, meta: dict[str, Any] | None = None) -> dict
         "current": current,
         "charge_speed": as_float(_lookup(index, "charge_speed")),
         "remaining_minutes": _duration_minutes(_lookup(index, "remaining_minutes")),
-        "limit": as_float(_lookup(index, "charge_limit")),
+        "limit": _charge_limit(_lookup(index, "charge_limit")),
         "power_consumption": as_float(_lookup(index, "power_consumption")),
         "dc_pile_voltage": as_float(_lookup(index, "dc_pile_voltage")),
     }

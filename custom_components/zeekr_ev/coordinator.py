@@ -25,6 +25,7 @@ from homeassistant.helpers.update_coordinator import (
     UpdateFailed,
 )
 
+from .api_gric import ZeekrGricApiClient
 from .api_sms import (
     ZeekrApiError,
     ZeekrAuthError,
@@ -55,13 +56,17 @@ _LOGGER = logging.getLogger(__name__)
 # re-poll normally still returns the *old* state -- which silently undid the
 # optimistic update and made successful commands look like failures.  Poll a few
 # times instead, spread over a minute.
+#
+# This is the SNC default.  A channel may override it with its own
+# ``command_refresh_delays`` attribute (GRIC does: its lock report took ~120 s).
 COMMAND_REFRESH_DELAYS: tuple[int, ...] = (10, 30, 60)
 
 
 class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
     """Fetch and normalise Zeekr vehicle state."""
 
-    def __init__(self, hass: HomeAssistant, client: ZeekrSmsApiClient,
+    def __init__(self, hass: HomeAssistant,
+                 client: ZeekrSmsApiClient | ZeekrGricApiClient,
                  entry: ConfigEntry) -> None:
         self.client = client
         self.entry = entry
@@ -245,7 +250,9 @@ class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         and report back; pass an explicit ``delay`` to poll just once.
         """
         self._cancel_scheduled_refreshes()
-        delays = (delay,) if delay is not None else COMMAND_REFRESH_DELAYS
+        delays = (delay,) if delay is not None else getattr(
+            self.client, "command_refresh_delays", COMMAND_REFRESH_DELAYS
+        )
 
         async def _refresh(_now) -> None:
             await self.async_request_refresh()

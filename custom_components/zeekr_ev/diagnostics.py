@@ -135,10 +135,13 @@ async def _probe_endpoints(coordinator: ZeekrCoordinator,
     Wrapped so a diagnostics download can never fail because of a probe.
     """
     vin = next(iter(data), None)
-    if not vin or not coordinator.client.has_gw3_token:
+    # Only the SMS client implements the X-VIN / endpoint probe; the GRIC
+    # client has no equivalent, so skip rather than report a bogus error.
+    probe = getattr(coordinator.client, "probe_endpoints", None)
+    if not vin or not coordinator.client.has_gw3_token or probe is None:
         return {}
     try:
-        return await coordinator.client.probe_endpoints(vin)
+        return await probe(vin)
     except Exception as exc:  # noqa: BLE001 - diagnostics must never raise
         return {"error": str(exc)}
 
