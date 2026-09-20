@@ -116,6 +116,29 @@ MAX_POLLING_INTERVAL = 60
 MIN_DURATION = 1
 MAX_DURATION = 60
 
+# Entities a given car may simply not have.
+#
+# The gateway's capability bitmap is per *service*, not per seat position: it
+# says the car can do seat heating, never that the rear bench is heated.  The
+# status payload is no help either — a car without rear heaters still returns
+# ``rlHeatLv``/``rrHeatLv``, as a plain 0.  So whether these controls are real
+# is something only the owner knows, and this option lets them say so.
+CONF_HIDDEN_ENTITIES = "hidden_entities"
+DEFAULT_HIDDEN_ENTITIES: list[str] = []
+
+HIDABLE_ENTITIES: dict[str, str] = {
+    "seat_heat_driver": "座椅 · 主驾加热",
+    "seat_heat_passenger": "座椅 · 副驾加热",
+    "seat_heat_rear_left": "座椅 · 左后加热",
+    "seat_heat_rear_right": "座椅 · 右后加热",
+    "seat_vent_driver": "座椅 · 主驾通风",
+    "seat_vent_passenger": "座椅 · 副驾通风",
+    "steering_wheel_heat": "方向盘加热",
+    "sunshade": "遮阳帘",
+    "charge_lid_lock": "充电口盖",
+    "sentry": "哨兵模式",
+}
+
 # Tokens persisted in the config entry so the integration can resume
 # without a fresh SMS challenge.
 STORAGE_DEVICE_ID = "device_id"

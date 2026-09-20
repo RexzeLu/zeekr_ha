@@ -32,6 +32,7 @@ from .const import (
     CONF_AC_DURATION,
     CONF_AUTH_METHOD,
     CONF_ENABLE_COMMANDS,
+    CONF_HIDDEN_ENTITIES,
     CONF_PHONE,
     CONF_POLLING_INTERVAL,
     CONF_REGION_CODE,
@@ -42,11 +43,13 @@ from .const import (
     DEFAULT_AC_DURATION,
     DEFAULT_AUTH_METHOD,
     DEFAULT_ENABLE_COMMANDS,
+    DEFAULT_HIDDEN_ENTITIES,
     DEFAULT_POLLING_INTERVAL,
     DEFAULT_REGION_CODE,
     DEFAULT_SEAT_DURATION,
     DEFAULT_STEERING_WHEEL_DURATION,
     DOMAIN,
+    HIDABLE_ENTITIES,
     MAX_DURATION,
     MAX_POLLING_INTERVAL,
     MIN_DURATION,
@@ -480,6 +483,17 @@ class ZeekrEVOptionsFlow(config_entries.OptionsFlow):
                     CONF_VEHICLE_IDENTIFIER,
                     default=current.get(CONF_VEHICLE_IDENTIFIER, ""),
                 ): str,
+                # Controls for hardware this particular car does not have
+                # (rear seat heaters, the sunshade…).  Nothing in the payload
+                # reveals it: the capability bitmap is per service rather than
+                # per seat, and a missing feature still reports a plain 0, so
+                # the owner has to say which ones to drop.
+                vol.Optional(
+                    CONF_HIDDEN_ENTITIES,
+                    default=current.get(
+                        CONF_HIDDEN_ENTITIES, DEFAULT_HIDDEN_ENTITIES
+                    ),
+                ): cv.multi_select(HIDABLE_ENTITIES),
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)

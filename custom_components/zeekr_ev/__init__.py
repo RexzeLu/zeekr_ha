@@ -17,9 +17,10 @@ import logging
 import re
 
 import homeassistant.helpers.config_validation as cv
+import homeassistant.helpers.entity_registry as er
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
-from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse, callback
 from homeassistant.exceptions import (
     ConfigEntryError,
     ConfigEntryNotReady,
@@ -190,6 +191,36 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     return True
 
 
+@callback
+def _async_purge_hidden_entities(hass: HomeAssistant, entry: ConfigEntry,
+                                 coordinator: "ZeekrCoordinator") -> None:
+    """Drop registry entries for controls this car does not have.
+
+    Simply not adding the entity is not enough — Home Assistant keeps registry
+    entries around, so ticking "rear seat heaters" in the options would leave a
+    dead control that only ever reads *unavailable*.  Removing the entry is
+    what actually makes it disappear.
+    """
+    hidden = coordinator.hidden_entities
+    if not hidden:
+        return
+    prefixes = [f"{vin}_" for vin in coordinator.vehicle_vins()]
+    if not prefixes:
+        return
+    registry = er.async_get(hass)
+    for entity in list(registry.entities.values()):
+        if entity.config_entry_id != entry.entry_id:
+            continue
+        unique_id = entity.unique_id or ""
+        for prefix in prefixes:
+            # ``unique_id`` is "<vin>_<key>"; the key itself contains
+            # underscores, so match on the VIN prefix rather than splitting.
+            if unique_id.startswith(prefix) and unique_id[len(prefix):] in hidden:
+                _LOGGER.debug("移除本车没有的功能实体: %s", entity.entity_id)
+                registry.async_remove(entity.entity_id)
+                break
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up a Zeekr account from a config entry."""
     hass.data.setdefault(DOMAIN, {})
@@ -222,6 +253,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
+
+    _async_purge_hidden_entities(hass, entry, coordinator)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     _async_register_services(hass)

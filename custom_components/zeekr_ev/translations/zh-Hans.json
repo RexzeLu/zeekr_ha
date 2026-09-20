@@ -64,7 +64,8 @@
           "ac_duration": "空调运行时长（分钟）",
           "steering_wheel_duration": "方向盘加热时长（分钟）",
           "vehicle_token": "车辆 X-VIN 令牌（短信通道，可选）",
-          "vehicle_identifier": "车辆 x-vehicle-identifier（GRIC 通道，必填）"
+          "vehicle_identifier": "车辆 x-vehicle-identifier（GRIC 通道，必填）",
+          "hidden_entities": "这辆车没有的功能（勾选后不再创建对应实体）"
         }
       }
     }

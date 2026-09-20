@@ -57,6 +57,10 @@ class ZeekrEntity(CoordinatorEntity[ZeekrCoordinator]):
     def __init__(self, coordinator: ZeekrCoordinator, vin: str, key: str) -> None:
         super().__init__(coordinator)
         self.vin = vin
+        #: Stable entity key (the suffix of ``unique_id``).  It is what the
+        #: ``hidden_entities`` option matches on, so a car that does not have a
+        #: feature can have its control removed without touching any platform.
+        self.key = key
         self._attr_unique_id = f"{vin}_{key}"
 
     # -- data access ------------------------------------------------------
@@ -129,7 +133,18 @@ class VehicleEntityManager:
                 )
                 break
             self._known.add(vin)
-            entities.extend(self._factory(vin))
+            created = self._factory(vin)
+            hidden = self.coordinator.hidden_entities
+            if hidden:
+                # Drop controls this car does not actually have.  Doing it here
+                # (rather than inside each platform) means one option covers
+                # every platform, and the entity never enters the registry.
+                created = [
+                    entity
+                    for entity in created
+                    if getattr(entity, "key", None) not in hidden
+                ]
+            entities.extend(created)
 
         if entities:
             _LOGGER.debug("为 %s 创建了 %d 个实体", new_vins, len(entities))

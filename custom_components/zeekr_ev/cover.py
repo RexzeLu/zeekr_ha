@@ -24,6 +24,22 @@ def _target(value: str) -> dict[str, Any]:
     return {"serviceParameters": [{"key": "target", "value": value}]}
 
 
+def _covers(coordinator: ZeekrCoordinator, vin: str) -> list[CoverEntity]:
+    """The cover entities this car actually has.
+
+    A car without a sunshade answers the "not equipped" sentinel instead of a
+    position, so the control is skipped outright rather than being shown as an
+    unavailable blind.  It is only skipped once a poll has actually said so —
+    otherwise a failed first refresh would silently remove it.
+    """
+    climate = ((coordinator.data or {}).get(vin) or {}).get("climate") or {}
+    entities: list[CoverEntity] = []
+    if climate.get("sunshade_supported") is not False:
+        entities.append(ZeekrSunshade(coordinator, vin))
+    entities.append(ZeekrWindows(coordinator, vin))
+    return entities
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -36,10 +52,7 @@ async def async_setup_entry(
         entry,
         coordinator,
         async_add_entities,
-        lambda vin: [
-            ZeekrSunshade(coordinator, vin),
-            ZeekrWindows(coordinator, vin),
-        ],
+        lambda vin: _covers(coordinator, vin),
     ).start()
 
 

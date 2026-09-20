@@ -64,7 +64,8 @@
           "ac_duration": "Air conditioning duration (minutes)",
           "steering_wheel_duration": "Steering wheel heating duration (minutes)",
           "vehicle_token": "Vehicle X-VIN token (SMS channel, optional)",
-          "vehicle_identifier": "Vehicle x-vehicle-identifier (GRIC channel, required)"
+          "vehicle_identifier": "Vehicle x-vehicle-identifier (GRIC channel, required)",
+          "hidden_entities": "Features this car does not have (entities are not created)"
         }
       }
     }

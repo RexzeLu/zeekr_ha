@@ -36,11 +36,13 @@ from .api_sms import (
 from .const import (
     CONF_AC_DURATION,
     CONF_ENABLE_COMMANDS,
+    CONF_HIDDEN_ENTITIES,
     CONF_POLLING_INTERVAL,
     CONF_SEAT_DURATION,
     CONF_STEERING_WHEEL_DURATION,
     DEFAULT_AC_DURATION,
     DEFAULT_ENABLE_COMMANDS,
+    DEFAULT_HIDDEN_ENTITIES,
     DEFAULT_POLLING_INTERVAL,
     DEFAULT_SEAT_DURATION,
     DEFAULT_STEERING_WHEEL_DURATION,
@@ -128,6 +130,20 @@ class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
     @property
     def commands_enabled(self) -> bool:
         return bool(self._option(CONF_ENABLE_COMMANDS, DEFAULT_ENABLE_COMMANDS))
+
+    @property
+    def hidden_entities(self) -> set[str]:
+        """Entity keys the user asked us not to create.
+
+        Used for hardware this particular car does not have.  The capability
+        bitmap cannot express it (it is per service, not per seat) and the
+        status payload reports a plain 0 either way, so the owner is the only
+        authority — see :data:`~.const.HIDABLE_ENTITIES`.
+        """
+        raw = self._option(CONF_HIDDEN_ENTITIES, DEFAULT_HIDDEN_ENTITIES)
+        if isinstance(raw, (list, tuple, set)):
+            return {str(item) for item in raw}
+        return set()
 
     # -- accessors --------------------------------------------------------
 
