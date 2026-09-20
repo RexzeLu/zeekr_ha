@@ -493,6 +493,12 @@ _ALIAS = {
     "position_trusted": ("position.posCanBeTrusted", "posCanBeTrusted",
                          "positionTrusted"),
     "position_frame": ("position.marsCoordinates", "marsCoordinates"),
+    # ``updateTime`` is the car's *own* upload stamp.  It is the only way to
+    # tell "Home Assistant polled a while ago" apart from "the car has not
+    # reported for a while" — and therefore whether a shorter polling interval
+    # can buy anything at all.
+    "report_time": ("updateTime", "statusTime", "vehicleStatusTime",
+                    "statusUpdateTime", "reportTime"),
     # plans
     "charge_plan_command": ("chargePlan.command", "chargePlanCommand",
                             "chargeScheduleCommand"),
@@ -1073,6 +1079,11 @@ def normalize_vehicle_data(raw: Any, meta: dict[str, Any] | None = None) -> dict
     # -- position --------------------------------------------------------
     canonical["position"] = _extract_position(index, raw)
 
+    # -- freshness -------------------------------------------------------
+    # When the car last uploaded, not when we last asked.  Exposed so a stale
+    # entity can be told apart from a stale poll.
+    canonical["report_time"] = _lookup(index, "report_time")
+
     # -- plans -----------------------------------------------------------
     canonical["charge_plan"] = {
         "command": _lookup(index, "charge_plan_command"),
@@ -1117,6 +1128,7 @@ _PROBE_FIELDS: tuple[tuple[str, str], ...] = (
     ("tyres.pressure.fl", "tyre_status_probe"),
     ("air.pm25", "pm25"),
     ("service.days_to_service", "days_to_service"),
+    ("report_time", "report_time"),
 )
 
 

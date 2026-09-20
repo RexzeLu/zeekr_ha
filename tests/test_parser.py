@@ -486,3 +486,16 @@ def test_seat_vent_level_is_kept_when_no_status_field_is_sent():
 
     assert data["seats"]["vent"]["fl"]["sts"] is None
     assert data["seats"]["vent"]["fl"]["level"] == 2
+
+
+def test_report_time_exposes_when_the_car_last_uploaded():
+    """A lagging value has two possible causes and they need telling apart.
+
+    Home Assistant polling too slowly and the car not reporting look identical
+    in the UI.  ``updateTime`` is the car's own upload stamp, so exposing it
+    tells you whether a shorter polling interval would buy anything at all.
+    """
+    payload = {"data": {"updateTime": "1789922460649", "soc": "90"}}
+    data = parser.normalize_vehicle_data(payload, {"vin": VIN_X})
+
+    assert data["report_time"] == "1789922460649"

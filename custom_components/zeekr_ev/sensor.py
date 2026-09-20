@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -11,6 +13,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
+    EntityCategory,
     PERCENTAGE,
     UnitOfElectricCurrent,
     UnitOfElectricPotential,
@@ -23,6 +26,7 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import ZeekrCoordinator
@@ -47,6 +51,7 @@ class SensorSpec:
     unit: str | None = None
     icon: str | None = None
     divisor: float = 1.0
+    category: EntityCategory | None = None
 
 
 def _build_specs() -> list[SensorSpec]:
@@ -140,6 +145,16 @@ def _build_specs() -> list[SensorSpec]:
             SensorDeviceClass.DURATION, None,
             UnitOfTime.DAYS, "mdi:calendar-clock",
         ),
+        # -- diagnostics -------------------------------------------------
+        # Not telemetry about the car, but about the *data*: when the car last
+        # uploaded.  This is what tells you whether a lagging value is Home
+        # Assistant polling too slowly or the car simply not reporting.
+        SensorSpec(
+            "report_time", "车况上报时间", ("report_time",),
+            SensorDeviceClass.TIMESTAMP, None,
+            None, "mdi:clock-check-outline",
+            category=EntityCategory.DIAGNOSTIC,
+        ),
     ]
 
     for pos in _TYRE_POSITIONS:
@@ -164,6 +179,26 @@ def _build_specs() -> list[SensorSpec]:
 
 
 SENSOR_SPECS = _build_specs()
+
+
+def _as_datetime(value: Any) -> datetime | None:
+    """Turn a gateway epoch stamp into an aware datetime.
+
+    GRIC reports milliseconds; a seconds stamp has been seen on the SNC side,
+    so anything that would land before 1973 is read as seconds instead.
+    """
+    try:
+        stamp = float(value)
+    except (TypeError, ValueError):
+        return None
+    if stamp <= 0:
+        return None
+    if stamp > 1e11:  # milliseconds
+        stamp /= 1000.0
+    try:
+        return datetime.fromtimestamp(stamp, tz=dt_util.UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 async def async_setup_entry(
@@ -196,12 +231,16 @@ class ZeekrSensor(ZeekrEntity, SensorEntity):
             self._attr_native_unit_of_measurement = spec.unit
         if spec.icon:
             self._attr_icon = spec.icon
+        if spec.category:
+            self._attr_entity_category = spec.category
 
     @property
     def native_value(self):
         value = self.get(*self._spec.path)
         if value is None:
             return None
+        if self._spec.device_class == SensorDeviceClass.TIMESTAMP:
+            return _as_datetime(value)
         if self._spec.divisor and self._spec.divisor != 1.0:
             try:
                 return round(float(value) / self._spec.divisor, 1)

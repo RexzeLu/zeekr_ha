@@ -98,7 +98,12 @@ DRIVE_SIDE_LHD = "lhd"
 DRIVE_SIDE_RHD = "rhd"
 
 DEFAULT_NAME = DOMAIN
-DEFAULT_POLLING_INTERVAL = 5  # minutes
+# Five minutes made a change made in the phone app take up to five minutes to
+# reach Home Assistant, which reads as "the integration is broken".  Two is the
+# balance: worst-case lag halves, and the extra requests stay modest (each poll
+# costs three calls per vehicle).  One minute is available for anyone who wants
+# the floor; below that the car's own upload cadence becomes the bottleneck.
+DEFAULT_POLLING_INTERVAL = 2  # minutes
 DEFAULT_REGION_CODE = "+86"
 DEFAULT_SEAT_DURATION = 15  # minutes
 DEFAULT_AC_DURATION = 15  # minutes
