@@ -18,3 +18,39 @@ dump_raw_status:
       example: "LXXXA1SXXXN022XXX"
       selector:
         text:
+
+set_climate:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: zeekr_ev
+    vin:
+      required: false
+      example: "LXXXA1SXXXN022XXX"
+      selector:
+        text:
+    enabled:
+      required: false
+      default: true
+      selector:
+        boolean:
+    duration:
+      required: false
+      example: 15
+      selector:
+        number:
+          min: 1
+          max: 60
+          step: 1
+          unit_of_measurement: minutes
+    temperature:
+      required: false
+      example: 22
+      selector:
+        number:
+          min: 16
+          max: 30
+          step: 0.5
+          unit_of_measurement: °C

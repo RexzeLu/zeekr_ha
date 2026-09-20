@@ -44,6 +44,7 @@ from .const import (
     DEFAULT_POLLING_INTERVAL,
     DEFAULT_SEAT_DURATION,
     DEFAULT_STEERING_WHEEL_DURATION,
+    DEFAULT_TARGET_TEMP,
     DOMAIN,
 )
 from .optimistic import OptimisticStore, assign, dig
@@ -88,6 +89,8 @@ class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self._unsub_refreshes: list[Callable[[], None]] = []
         self.entry.async_on_unload(self._cancel_scheduled_refreshes)
         self._optimistic = OptimisticStore()
+        # Set by the number entity; falls back to the stored option.
+        self._ac_duration_override: int | None = None
 
     # -- options ----------------------------------------------------------
 
@@ -102,7 +105,19 @@ class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
     @property
     def ac_duration(self) -> int:
+        """Minutes the next climate start should run for.
+
+        The stored option is the default; a value set on the number entity wins
+        because it is what the user asked for most recently.  The App behaves
+        the same way — you pick a duration each time you start the cabin AC.
+        """
+        if self._ac_duration_override is not None:
+            return int(self._ac_duration_override)
         return int(self._option(CONF_AC_DURATION, DEFAULT_AC_DURATION))
+
+    def set_ac_duration(self, minutes: int) -> None:
+        """Set the runtime override used by the next climate start."""
+        self._ac_duration_override = int(minutes)
 
     @property
     def steering_wheel_duration(self) -> int:
@@ -267,6 +282,49 @@ class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         for unsub in self._unsub_refreshes:
             unsub()
         self._unsub_refreshes.clear()
+
+    def _sane_target_temp(self, vin: str) -> float:
+        """Last setpoint the car reported, or the default if it is unusable.
+
+        The cloud answers ``"0.0"`` for ``currentTemperature`` whenever the AC
+        is off, and echoing that back would ask the car to cool to zero.
+        """
+        cached = (self.data or {}).get(vin) or {}
+        try:
+            value = float((cached.get("climate") or {}).get("target_temp"))
+        except (TypeError, ValueError):
+            return DEFAULT_TARGET_TEMP
+        return value if value > 0 else DEFAULT_TARGET_TEMP
+
+    async def async_set_climate(self, vin: str, *, enabled: bool = True,
+                                temperature: float | None = None,
+                                duration: int | None = None
+                                ) -> dict[str, Any]:
+        """Start or stop the cabin AC, optionally for a set number of minutes.
+
+        ``AC.duration`` is what makes the car stop pre-conditioning on its own,
+        which is how the App starts it; a start without it inherits whatever the
+        last call left behind.  Both the climate entity and the ``set_climate``
+        service go through here so the payload cannot drift apart.
+        """
+        if duration is not None:
+            self.set_ac_duration(int(duration))
+        parameters = [{"key": "AC", "value": "true" if enabled else "false"}]
+        if enabled:
+            if temperature is None:
+                temperature = self._sane_target_temp(vin)
+            parameters.append({"key": "AC.temp", "value": str(temperature)})
+            parameters.append(
+                {"key": "AC.duration", "value": str(self.ac_duration)}
+            )
+
+        result = await self.async_send_and_refresh(
+            vin, "start", "ZAF", {"serviceParameters": parameters}
+        )
+        self.set_optimistic(vin, "climate", "ac_on", value=enabled)
+        if enabled and temperature is not None:
+            self.set_optimistic(vin, "climate", "target_temp", value=float(temperature))
+        return result
 
     async def async_set_charge_plan(self, vin: str, start_time: str,
                                     end_time: str, command: str,

@@ -102,6 +102,9 @@ DEFAULT_POLLING_INTERVAL = 5  # minutes
 DEFAULT_REGION_CODE = "+86"
 DEFAULT_SEAT_DURATION = 15  # minutes
 DEFAULT_AC_DURATION = 15  # minutes
+# Used when a climate start has no explicit setpoint.  The car reports "0.0"
+# while the AC is off, so that value must never be sent back as a setpoint.
+DEFAULT_TARGET_TEMP = 22.0
 DEFAULT_STEERING_WHEEL_DURATION = 15  # minutes
 DEFAULT_ENABLE_COMMANDS = True
 
@@ -186,10 +189,14 @@ PLATFORMS = [
 # Services
 SERVICE_REFRESH = "refresh"
 SERVICE_DUMP_RAW = "dump_raw_status"
+SERVICE_SET_CLIMATE = "set_climate"
 
 # Service attributes
 ATTR_VIN = "vin"
 ATTR_CONFIG_ENTRY_ID = "config_entry_id"
+ATTR_TEMPERATURE = "temperature"
+ATTR_DURATION = "duration"
+ATTR_ENABLED = "enabled"
 
 STARTUP_MESSAGE = f"""
 -------------------------------------------------------------------

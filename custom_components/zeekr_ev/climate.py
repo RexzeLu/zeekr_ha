@@ -16,13 +16,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import DOMAIN
+from .const import DEFAULT_TARGET_TEMP, DOMAIN
 from .coordinator import ZeekrCoordinator
 from .entity import VehicleEntityManager, ZeekrEntity
 
 _LOGGER = logging.getLogger(__name__)
-
-DEFAULT_TARGET_TEMP = 22.0
 
 
 async def async_setup_entry(
@@ -102,28 +100,30 @@ class ZeekrClimate(ZeekrEntity, ClimateEntity, RestoreEntity):
             return None
         return HVACMode.HEAT_COOL if active else HVACMode.OFF
 
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Surface the run time the next start will carry.
+
+        The car stops the AC by itself after ``AC.duration``, so this is the
+        number that decides when — and it is otherwise only visible on the
+        separate number entity.
+        """
+        return {"duration_minutes": self.coordinator.ac_duration}
+
     # -- commands ---------------------------------------------------------
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         if hvac_mode == HVACMode.HEAT_COOL:
-            duration = self.coordinator.ac_duration
-            await self.send_command(
-                "start",
-                "ZAF",
-                {
-                    "serviceParameters": [
-                        {"key": "AC", "value": "true"},
-                        {"key": "AC.temp", "value": str(self._attr_target_temperature)},
-                        {"key": "AC.duration", "value": str(duration)},
-                    ]
-                },
+            await self.coordinator.async_set_climate(
+                self.vin,
+                enabled=True,
+                temperature=self._attr_target_temperature,
+                # Whatever the number entity holds; the option default if never
+                # touched.  The car ends pre-conditioning by itself when it runs out.
+                duration=self.coordinator.ac_duration,
             )
-            self.coordinator.set_optimistic(self.vin, "climate", "ac_on", value=True)
         elif hvac_mode == HVACMode.OFF:
-            await self.send_command(
-                "start", "ZAF", {"serviceParameters": [{"key": "AC", "value": "false"}]}
-            )
-            self.coordinator.set_optimistic(self.vin, "climate", "ac_on", value=False)
+            await self.coordinator.async_set_climate(self.vin, enabled=False)
         else:
             _LOGGER.warning("不支持的空调模式: %s", hvac_mode)
 

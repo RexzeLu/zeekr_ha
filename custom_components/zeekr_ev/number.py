@@ -1,4 +1,4 @@
-"""Number platform — charging limit."""
+"""Number platform — charging limit and climate run time."""
 
 from __future__ import annotations
 
@@ -6,11 +6,11 @@ from typing import Any
 
 from homeassistant.components.number import NumberMode, RestoreNumber
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE
+from homeassistant.const import PERCENTAGE, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import DOMAIN, MAX_DURATION, MIN_DURATION
 from .coordinator import ZeekrCoordinator
 from .entity import VehicleEntityManager, ZeekrEntity
 
@@ -27,7 +27,10 @@ async def async_setup_entry(
         entry,
         coordinator,
         async_add_entities,
-        lambda vin: [ZeekrChargingLimitNumber(coordinator, vin)],
+        lambda vin: [
+            ZeekrChargingLimitNumber(coordinator, vin),
+            ZeekrAcDurationNumber(coordinator, vin),
+        ],
     ).start()
 
 
@@ -86,3 +89,43 @@ class ZeekrChargingLimitNumber(ZeekrEntity, RestoreNumber):
         self.coordinator.set_optimistic(
             self.vin, "battery", "limit", value=value
         )
+
+
+class ZeekrAcDurationNumber(ZeekrEntity, RestoreNumber):
+    """How long the *next* climate start runs, in minutes.
+
+    The App asks for a duration every time you start the cabin AC, and it stops
+    on its own when it elapses.  Here that used to live only in the integration
+    options: invisible on the device page and impossible to vary per call, so
+    the car always got the same number.
+
+    This is a **setting, not a command** — changing it talks to nobody.  It only
+    decides what ``AC.duration`` the next ``climate.set_hvac_mode`` carries,
+    which is why it must not call ``send_command``.
+    """
+
+    _attr_name = "空调运行时长"
+    _attr_icon = "mdi:timer-outline"
+    _attr_native_min_value = MIN_DURATION
+    _attr_native_max_value = MAX_DURATION
+    _attr_native_step = 1
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_mode = NumberMode.BOX
+
+    def __init__(self, coordinator: ZeekrCoordinator, vin: str) -> None:
+        super().__init__(coordinator, vin, "ac_duration")
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        # Restore what the user last picked; otherwise the option default stands.
+        last = await self.async_get_last_number_data()
+        if last is not None and last.native_value is not None:
+            self.coordinator.set_ac_duration(int(last.native_value))
+
+    @property
+    def native_value(self) -> float | None:
+        return float(self.coordinator.ac_duration)
+
+    async def async_set_native_value(self, value: float) -> None:
+        self.coordinator.set_ac_duration(int(round(value)))
+        self.async_write_ha_state()

@@ -32,18 +32,26 @@ from .api_gric import ZeekrGricApiClient
 from .api_sms import ZeekrSmsApiClient
 from .const import (
     ATTR_CONFIG_ENTRY_ID,
+    ATTR_DURATION,
+    ATTR_ENABLED,
+    ATTR_TEMPERATURE,
     ATTR_VIN,
     AUTH_METHOD_GRIC,
+    CONF_AC_DURATION,
     CONF_AUTH_METHOD,
     CONF_PHONE,
     CONF_REGION_CODE,
     CONF_VEHICLE_IDENTIFIER,
     CONF_VEHICLE_TOKEN,
+    DEFAULT_AC_DURATION,
     DEFAULT_AUTH_METHOD,
     DOMAIN,
+    MAX_DURATION,
+    MIN_DURATION,
     PLATFORMS,
     SERVICE_DUMP_RAW,
     SERVICE_REFRESH,
+    SERVICE_SET_CLIMATE,
     STARTUP_MESSAGE,
 )
 from .coordinator import ZeekrCoordinator
@@ -323,6 +331,48 @@ def _async_register_services(hass: HomeAssistant) -> None:
             raise HomeAssistantError("未找到匹配的极氪配置项")
         return result
 
+    async def _service_set_climate(call: ServiceCall) -> dict:
+        """Start/stop the cabin AC with an explicit run time.
+
+        This is the App's "run the AC for N minutes and stop" as a callable, so
+        an automation can pick the duration per call instead of sharing the one
+        value stored in the options.
+        """
+        entry_id = call.data.get(ATTR_CONFIG_ENTRY_ID)
+        vin = call.data.get(ATTR_VIN)
+        enabled = bool(call.data.get(ATTR_ENABLED, True))
+        temperature = call.data.get(ATTR_TEMPERATURE)
+        duration = call.data.get(ATTR_DURATION)
+
+        if temperature is not None:
+            temperature = float(temperature)
+        if duration is not None:
+            duration = int(duration)
+            if not MIN_DURATION <= duration <= MAX_DURATION:
+                raise HomeAssistantError(
+                    f"duration 需在 {MIN_DURATION}–{MAX_DURATION} 分钟之间，收到 {duration}"
+                )
+
+        results: dict[str, dict] = {}
+        for eid, coordinator in hass.data.get(DOMAIN, {}).items():
+            if not isinstance(coordinator, ZeekrCoordinator):
+                continue
+            if entry_id and eid != entry_id:
+                continue
+            targets = [vin] if vin else [
+                vehicle.vin for vehicle in coordinator.vehicles
+            ]
+            for target in targets:
+                results[target] = await coordinator.async_set_climate(
+                    target,
+                    enabled=enabled,
+                    temperature=temperature,
+                    duration=duration,
+                )
+        if not results:
+            raise HomeAssistantError("未找到匹配的极氪配置项或车辆")
+        return results
+
     if not hass.services.has_service(DOMAIN, SERVICE_REFRESH):
         hass.services.async_register(
             DOMAIN,
@@ -340,6 +390,25 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 {
                     vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string,
                     vol.Optional(ATTR_VIN): cv.string,
+                }
+            ),
+            supports_response=SupportsResponse.ONLY,
+        )
+
+    if not hass.services.has_service(DOMAIN, SERVICE_SET_CLIMATE):
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_SET_CLIMATE,
+            _service_set_climate,
+            schema=vol.Schema(
+                {
+                    vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string,
+                    vol.Optional(ATTR_VIN): cv.string,
+                    vol.Optional(ATTR_ENABLED, default=True): cv.boolean,
+                    vol.Optional(ATTR_TEMPERATURE): vol.Coerce(float),
+                    vol.Optional(ATTR_DURATION): vol.All(
+                        vol.Coerce(int), vol.Range(min=MIN_DURATION, max=MAX_DURATION)
+                    ),
                 }
             ),
             supports_response=SupportsResponse.ONLY,
