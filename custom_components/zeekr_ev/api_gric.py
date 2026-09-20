@@ -124,9 +124,12 @@ _RELOGIN_CODES = {"00A17", "1018P061"}
 _BAD_IDENT_MARKERS = ("x-vehicle-identifier",)
 _MISSING_HEADER_CODES = {"00A02"}
 
-# How long before expiry the access token is renewed.  The pair rotates as a
-# unit, so renewing early is free; renewing late means a failed poll.
-_REFRESH_MARGIN_SECONDS = 3600.0
+# How long before expiry the access token is renewed.  Access tokens live 7 days
+# and the pair rotates as a unit, so renewing early is free while renewing late
+# means a failed poll — and an *expired* access token is answered with a code we
+# do not necessarily recognise as "needs refresh".  A day of headroom means a
+# long-lived Home Assistant process renews long before the gateway can refuse it.
+_REFRESH_MARGIN_SECONDS = 24 * 3600.0
 # A fresh refresh token stays valid for 30 days and every rotation resets that,
 # so this is only a sanity bound for the "is it worth trying" decision.
 _REFRESH_TOKEN_LIFETIME = 30 * 24 * 3600
@@ -717,6 +720,11 @@ class ZeekrGricApiClient:
 
     async def async_fetch_all(self) -> dict[str, dict[str, Any]]:
         """Fetch + normalise status for every known vehicle."""
+        # Renew *before* the poll rather than after a refusal.  Polling is the
+        # only thing a long-running Home Assistant does on its own, so it is the
+        # natural place to keep the chain alive: within the margin this rotates
+        # the pair once and then leaves it alone for another seven days.
+        await self.async_ensure_gw3_token()
         if not self._vehicles:
             await self.async_get_vehicle_list()
 
@@ -781,7 +789,10 @@ class ZeekrGricApiClient:
         return {**result, "gateway": "gric"}
 
     async def _require_access_token(self) -> None:
-        if self._access_token or await self.async_ensure_gw3_token():
+        # Freshness, not mere presence: an expired token is still "present" but
+        # every call made with it fails, and the failure code is not guaranteed
+        # to be one the retry path recognises.
+        if self._access_token_fresh() or await self.async_ensure_gw3_token():
             return
         raise ZeekrAuthError(
             "无法下发指令：没有可用的 GRIC 访问令牌，自动刷新也失败。"

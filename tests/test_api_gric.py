@@ -184,6 +184,23 @@ def _client(body=None, **tokens):
     return client, session
 
 
+class _SequenceSession:
+    """Hands out each response in turn (the last one repeats).
+
+    Renewal changes the *order* of calls, so a single canned body is not enough
+    to tell "renewed first" from "renewed after a refusal".
+    """
+
+    def __init__(self, responses):
+        self._responses = responses
+        self.calls: list[dict] = []
+
+    def request(self, method, url, **kwargs):
+        self.calls.append({"method": method, "url": url, **kwargs})
+        index = min(len(self.calls) - 1, len(self._responses) - 1)
+        return _FakeRequest(_FakeResponse(copy.deepcopy(self._responses[index])))
+
+
 # ---------------------------------------------------------------------------
 # Signature primitives
 # ---------------------------------------------------------------------------
@@ -496,10 +513,11 @@ def test_a_refresh_token_alone_can_bootstrap_the_channel():
 
 
 def test_ensure_skips_the_round_trip_when_the_access_token_is_fresh():
+    """Renewal is triggered a day ahead, so "fresh" means more than a day left."""
     client, session = _client(
         {"code": "0", "data": {}},
         **{
-            gric.STORAGE_GRIC_ACCESS_TOKEN: _jwt(int(time.time()) + 7200),
+            gric.STORAGE_GRIC_ACCESS_TOKEN: _jwt(int(time.time()) + 3 * 24 * 3600),
             gric.STORAGE_GRIC_REFRESH_TOKEN: "R",
         },
     )
@@ -518,6 +536,70 @@ def test_ensure_refreshes_an_expired_access_token():
     assert asyncio.run(client.async_ensure_gw3_token()) is True
     assert len(session.calls) == 1
     assert "refresh/token" in session.calls[0]["url"]
+
+
+def test_poll_renews_the_access_token_before_the_gateway_can_refuse_it():
+    """Polling is the only heartbeat a long-running Home Assistant has.
+
+    Access tokens live 7 days.  Renewing on failure alone means the first poll
+    after expiry has to be recognised as "needs a refresh" — and the code for an
+    *expired* token is not necessarily the one we map to a retry.
+    """
+    REFRESH = {"code": "0", "data": {"accessToken": "A2", "refreshToken": "R2"}}
+    session = _SequenceSession([
+        REFRESH,
+        {"code": "0", "data": [{
+            "vin": "L6T77HCE9PF081833",
+            "plateNo": "粤ADR2642",
+            "seriesCode": "BX1E",
+            "tspHost": "https://gric-zhf-api.geely.com",
+        }]},
+        {"code": "0", "data": {"electricVehicleStatus": {"chargeLevel": "90.0"}}},
+    ])
+    client = gric.ZeekrGricApiClient(session)
+    client.store_tokens({
+        # Inside the renewal margin but not yet expired.
+        gric.STORAGE_GRIC_ACCESS_TOKEN: _jwt(int(time.time()) + 3600),
+        gric.STORAGE_GRIC_REFRESH_TOKEN: "R1",
+        gric.CONF_VEHICLE_IDENTIFIER: "IDENT",
+    })
+
+    asyncio.run(client.async_fetch_all())
+
+    # Renewal happens first, not after a refusal.
+    assert "refresh/token" in session.calls[0]["url"]
+    # ...and the rotated pair is what gets used and persisted.
+    status_call = next(
+        call for call in session.calls if "vehicle/status/latest" in call["url"]
+    )
+    assert status_call["headers"]["authorization"] == "A2"
+    storage = client.get_token_storage()
+    assert storage[gric.STORAGE_GRIC_ACCESS_TOKEN] == "A2"
+    assert storage[gric.STORAGE_GRIC_REFRESH_TOKEN] == "R2"
+
+
+def test_control_renews_an_expired_token_instead_of_sending_it():
+    """An expired token is still *present* — presence is not freshness."""
+    session = _SequenceSession([
+        {"code": "0", "data": {"accessToken": "A2", "refreshToken": "R2"}},
+        {"code": "0", "msg": "操作成功"},
+    ])
+    client = gric.ZeekrGricApiClient(session)
+    client.store_tokens({
+        gric.STORAGE_GRIC_ACCESS_TOKEN: _jwt(int(time.time()) + 60),
+        gric.STORAGE_GRIC_REFRESH_TOKEN: "R1",
+        gric.CONF_VEHICLE_IDENTIFIER: "IDENT",
+    })
+
+    asyncio.run(client.async_do_remote_control(
+        "VIN", "start", "RHL",
+        {"serviceParameters": [{"key": "rhl", "value": "light-flash"}]},
+    ))
+
+    assert "refresh/token" in session.calls[0]["url"]
+    control = session.calls[1]
+    assert "remoteControl/control" in control["url"]
+    assert control["headers"]["authorization"] == "A2"
 
 
 def test_expired_session_triggers_one_refresh_then_replays():
