@@ -140,13 +140,20 @@ _REFRESH_TOKEN_LIFETIME = 30 * 24 * 3600
 # A poll used to fire three requests every time: status, then these two.  But
 # the status payload already carries the live charging state (``chargeSts``,
 # ``chargerState``, ``statusOfChargerConnection``, voltage/current and
-# ``timeToFullyCharged``) — verified against a real capture — so the extras only
-# add what the status leaves out, and those change far more slowly than the
-# status does.  Charging is the one situation where they move, hence the second
-# column; a car that is plugged in and charging gets the short interval.
+# ``timeToFullyCharged``) — parsing a real idle capture with the extras removed
+# leaves not one canonical field empty, so while the car sits still these two
+# buy nothing at all.  The only genuinely exclusive value is ``battery.limit``,
+# and that comes from ``chargingLimit``, not from the status service.
+#
+# So: an hour while idle, for both.  Charging is the one situation where the
+# status service may still report detail the status omits, hence the second
+# column.  The limit keeps the hour even then — it is a *setting*, it cannot
+# move on its own, and a charge command drops the cache explicitly (see
+# ``invalidate_extras``); only editing it in the app can make HA lag by up to
+# an hour.
 _EXTRAS_TTL = {
-    "chargingStatus": (300.0, 60.0),   # 5 min idle / 1 min while charging
-    "chargingLimit": (1800.0, 300.0),  # 30 min idle — it is a *setting*
+    "chargingStatus": (3600.0, 120.0),  # 1 h idle / 2 min while charging
+    "chargingLimit": (3600.0, 3600.0),  # 1 h either way — it is a *setting*
 }
 
 # Leaves that say whether the car is taking charge, used only to pick the TTL
