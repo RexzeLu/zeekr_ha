@@ -159,6 +159,10 @@ class ZeekrClimate(ZeekrEntity, ClimateEntity, RestoreEntity):
             # stops reporting one, the entity falls back to its own memory and
             # this says so, instead of the value just silently freezing.
             "car_target_temp": self._reported_target(),
+            # What the car actually sent.  The App's ends of the scale are not
+            # numbers ("LO" / "HI"), so this is where a guessed setpoint can be
+            # told apart from a real one.
+            "car_target_temp_raw": self.get("climate", "target_temp_raw"),
             # When the car last uploaded the climate block.  This is what tells
             # "the car has not uploaded the new setpoint yet" apart from "the
             # integration read the wrong field" — they look identical otherwise.

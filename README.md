@@ -434,6 +434,14 @@ data:
 | `car_target_temp` | 车端上报的设定温度（`currentTemperature`）；`null` = 车没报 |
 | `target_temp_source` | `car` = 用的是车端值；`local` = 车没报，回落到 HA 自己记的值 |
 | `car_temp_reported_at` | 车端**这份温度**的上传时间（`temperatureUpdateTime`） |
+| `car_target_temp_raw` | 车端原样上报的值（可能是 `LO` / `HI` 这类非数字档位） |
+
+⚠️ App 的温度档位是 **`LO` — 16 … 28 — `HI`**，两端**不是数字**。车端若把端点原样上报，
+读到的是 token 而不是数字 ⇒ 旧版本会当成「车没报」并回落到 HA 自己记的温度，
+表现就是「手机上改了、HA 不动」。现在端点会映射成数值（`LO`→15、`HI`→30），
+并把原值留在 `car_target_temp_raw` 里便于核对。
+⚠️ `HI`→30 有报文佐证（一次真实车况上报 `currentTemperature: "30.0"`，高于数字档上限 28）；
+**`LO`→15 是推定值，待实测确认**。
 
 判据：`car_temp_reported_at` 是**旧时间** ⇒ 车还没上传（车端休眠/省电，HA 再快也没用）；
 时间是新的、但 `car_target_temp` 跟手机不一样 ⇒ 字段读错了（换字段）；

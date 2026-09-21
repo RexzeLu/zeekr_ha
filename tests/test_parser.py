@@ -470,6 +470,32 @@ def test_ac_target_temperature_is_not_read_from_the_cloud():
     assert data["climate"]["target_temp"] is None
 
 
+def test_ac_setpoint_accepts_the_app_non_numeric_extremes():
+    """The App's picker is ``LO - 16 … 28 - HI``; the ends are not numbers.
+
+    Uploaded verbatim they are not floats, so the setpoint used to read as
+    "the car reported nothing" and the entity quietly fell back to its own
+    remembered value — the setpoint then never followed the phone.
+    """
+    for token, expected in (("LO", parser.AC_LOW_TEMP),
+                            ("HI", parser.AC_HIGH_TEMP),
+                            ("low", parser.AC_LOW_TEMP),
+                            ("high", parser.AC_HIGH_TEMP)):
+        payload = {"climateStatus": {"currentTemperature": token}}
+        data = parser.normalize_vehicle_data(payload, {"vin": VIN_X})
+
+        assert data["climate"]["target_temp"] == expected
+        assert data["climate"]["target_temp_raw"] == token
+
+
+def test_ac_setpoint_keeps_a_normal_setpoint_verbatim():
+    payload = {"climateStatus": {"currentTemperature": "22.5"}}
+    data = parser.normalize_vehicle_data(payload, {"vin": VIN_X})
+
+    assert data["climate"]["target_temp"] == 22.5
+    assert data["climate"]["target_temp_raw"] == "22.5"
+
+
 def test_climate_reports_when_the_car_uploaded_the_temperature():
     """``temperatureUpdateTime`` is the only way to tell a stale upload from a
     mis-read field: both make the setpoint look frozen in Home Assistant."""

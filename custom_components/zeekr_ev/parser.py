@@ -22,7 +22,7 @@ Canonical shape (all keys always present, values may be ``None``)::
       "odometer": float | None,
       "trips":    {"trip1", "trip2", "avg_speed"},
       "climate":  {"inside_temp", "outside_temp", "target_temp", "ac_on",
-                   "blower", "defrost", "steering_wheel_heat",
+                   "target_temp_raw", "blower", "defrost", "steering_wheel_heat",
                    "temp_reported_at",
                    "curtain_open", "curtain_open_status", "curtain_pos",
                    "sunshade_supported",
@@ -252,6 +252,36 @@ def _positive_float(value: Any) -> float | None:
     """
     number = as_float(value)
     return number if number else None
+
+
+# The App's temperature picker is ``LO - 16 … 28 - HI``: the two ends are
+# *not* numbers.  Whatever the car uploads for them is therefore a token rather
+# than a setpoint, and :func:`as_float` turns it into ``None`` — which made the
+# entity fall back to its own remembered value and look like "the setpoint
+# never follows the phone".
+#
+# ``AC_HIGH_TEMP`` is observed: a real payload reported ``currentTemperature:
+# "30.0"``, above the 28 the numeric range tops out at.  ``AC_LOW_TEMP`` is the
+# mirror guess and still needs a payload with the low end selected to confirm.
+AC_LOW_TEMP = 15.0
+AC_HIGH_TEMP = 30.0
+_AC_LOW_TOKENS = {"lo", "low", "min", "mincool", "coolest", "coldest",
+                  "最低", "最冷", "极低"}
+_AC_HIGH_TOKENS = {"hi", "high", "max", "maxheat", "hottest", "warmest",
+                   "最高", "最热", "极高"}
+
+
+def _ac_setpoint(value: Any) -> float | None:
+    """A setpoint, accepting the App's non-numeric ``LO`` / ``HI`` extremes."""
+    number = _positive_float(value)
+    if number is not None:
+        return number
+    token = str(value).strip().lower() if value is not None else ""
+    if token in _AC_LOW_TOKENS:
+        return AC_LOW_TEMP
+    if token in _AC_HIGH_TOKENS:
+        return AC_HIGH_TEMP
+    return None
 
 
 _TRUE_TOKENS = {"1", "true", "on", "yes", "open", "opened", "active", "running",
@@ -993,11 +1023,15 @@ def normalize_vehicle_data(raw: Any, meta: dict[str, Any] | None = None) -> dict
     sunroof_open, sunroof_pos, sunroof_supported = _resolve_opening(
         _lookup(index, "sunroof_pos"), _lookup(index, "sunroof_open")
     )
+    raw_setpoint = _lookup(index, "target_temp")
     canonical["climate"] = {
         "inside_temp": as_float(_lookup(index, "inside_temp")),
         "outside_temp": as_float(_lookup(index, "outside_temp")),
         # 0.0 is the "no setpoint" sentinel, not a temperature.
-        "target_temp": _positive_float(_lookup(index, "target_temp")),
+        "target_temp": _ac_setpoint(raw_setpoint),
+        # Kept verbatim so a "LO"/"HI" style upload is visible instead of
+        # silently turning into a number we guessed.
+        "target_temp_raw": None if raw_setpoint is None else str(raw_setpoint),
         "temp_reported_at": as_int(_lookup(index, "temp_reported_at")),
         "ac_on": as_bool(_lookup(index, "ac_on")),
         "blower": as_bool(_lookup(index, "blower")),
