@@ -3,3 +3,6 @@ pytest
 pytest-homeassistant-custom-component
 pytest-cov
 pytest-asyncio
+# Used by tests/test_static.py: an undefined name in a module no test imports
+# is invisible to every other check until a screen turns into a 500.
+pyflakes

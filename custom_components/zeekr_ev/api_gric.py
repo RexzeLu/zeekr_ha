@@ -56,7 +56,7 @@ import logging
 import time
 import uuid
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 from .api_sms import (
     ZeekrApiError,

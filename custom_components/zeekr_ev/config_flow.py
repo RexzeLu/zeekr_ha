@@ -22,6 +22,7 @@ from typing import Any
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
+from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api_gric import ZeekrGricApiClient
@@ -429,71 +430,101 @@ class ZeekrEVOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
-
-        current = {**self.config_entry.data, **self.config_entry.options}
-        schema = vol.Schema(
-            {
-                vol.Optional(
-                    CONF_POLLING_INTERVAL,
-                    default=current.get(
-                        CONF_POLLING_INTERVAL, DEFAULT_POLLING_INTERVAL
-                    ),
-                ): vol.All(
-                    vol.Coerce(int),
-                    vol.Range(min=MIN_POLLING_INTERVAL, max=MAX_POLLING_INTERVAL),
-                ),
-                vol.Optional(
-                    CONF_ENABLE_COMMANDS,
-                    default=current.get(
-                        CONF_ENABLE_COMMANDS, DEFAULT_ENABLE_COMMANDS
-                    ),
-                ): bool,
-                vol.Optional(
-                    CONF_SEAT_DURATION,
-                    default=current.get(CONF_SEAT_DURATION, DEFAULT_SEAT_DURATION),
-                ): vol.All(
-                    vol.Coerce(int), vol.Range(min=MIN_DURATION, max=MAX_DURATION)
-                ),
-                vol.Optional(
-                    CONF_AC_DURATION,
-                    default=current.get(CONF_AC_DURATION, DEFAULT_AC_DURATION),
-                ): vol.All(
-                    vol.Coerce(int), vol.Range(min=MIN_DURATION, max=MAX_DURATION)
-                ),
-                vol.Optional(
-                    CONF_STEERING_WHEEL_DURATION,
-                    default=current.get(
-                        CONF_STEERING_WHEEL_DURATION, DEFAULT_STEERING_WHEEL_DURATION
-                    ),
-                ): vol.All(
-                    vol.Coerce(int), vol.Range(min=MIN_DURATION, max=MAX_DURATION)
-                ),
-                # Optional.  The SNCTSP platform addresses a car with this
-                # opaque token instead of the VIN, and the token is what carries
-                # the car's permissions, so it cannot be computed here.  Leave
-                # it empty to keep using an encrypted VIN (see README).
-                vol.Optional(
-                    CONF_VEHICLE_TOKEN,
-                    default=current.get(CONF_VEHICLE_TOKEN, ""),
-                ): str,
-                # GRIC channel only: the app's per-vehicle ``x-vehicle-identifier``.
-                # Vehicle lists work without it, but every read and every command
-                # is refused — so it is what turns a listing into control.
-                vol.Optional(
-                    CONF_VEHICLE_IDENTIFIER,
-                    default=current.get(CONF_VEHICLE_IDENTIFIER, ""),
-                ): str,
-                # Controls for hardware this particular car does not have
-                # (rear seat heaters, the sunshade…).  Nothing in the payload
-                # reveals it: the capability bitmap is per service rather than
-                # per seat, and a missing feature still reports a plain 0, so
-                # the owner has to say which ones to drop.
-                vol.Optional(
-                    CONF_HIDDEN_ENTITIES,
-                    default=current.get(
-                        CONF_HIDDEN_ENTITIES, DEFAULT_HIDDEN_ENTITIES
-                    ),
-                ): cv.multi_select(HIDABLE_ENTITIES),
-            }
+        return self.async_show_form(
+            step_id="init", data_schema=self._options_schema()
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+
+    def _options_schema(self) -> vol.Schema:
+        """Build the options form, dropping whatever cannot be built.
+
+        Building it used to raise ``NameError`` (``cv`` was never imported in
+        this module), which left Home Assistant with no schema to render and
+        turned the whole dialog into a 500.  The optional part is therefore
+        built last and dropped on failure: a broken picker should cost one
+        option, not access to every other setting.
+        """
+        try:
+            return self._build_options_schema()
+        except Exception:  # noqa: BLE001 - never 500 the dialog
+            _LOGGER.exception("选项表单构建失败，已退回精简版")
+            return self._build_options_schema(full=False)
+
+    def _build_options_schema(self, *, full: bool = True) -> vol.Schema:
+        current = {**self.config_entry.data, **self.config_entry.options}
+        minutes = vol.All(
+            vol.Coerce(int), vol.Range(min=MIN_DURATION, max=MAX_DURATION)
+        )
+        fields: dict[Any, Any] = {
+            vol.Optional(
+                CONF_POLLING_INTERVAL,
+                default=current.get(CONF_POLLING_INTERVAL, DEFAULT_POLLING_INTERVAL),
+            ): vol.All(
+                vol.Coerce(int),
+                vol.Range(min=MIN_POLLING_INTERVAL, max=MAX_POLLING_INTERVAL),
+            ),
+            vol.Optional(
+                CONF_ENABLE_COMMANDS,
+                default=current.get(CONF_ENABLE_COMMANDS, DEFAULT_ENABLE_COMMANDS),
+            ): bool,
+            vol.Optional(
+                CONF_SEAT_DURATION,
+                default=current.get(CONF_SEAT_DURATION, DEFAULT_SEAT_DURATION),
+            ): minutes,
+            vol.Optional(
+                CONF_AC_DURATION,
+                default=current.get(CONF_AC_DURATION, DEFAULT_AC_DURATION),
+            ): minutes,
+            vol.Optional(
+                CONF_STEERING_WHEEL_DURATION,
+                default=current.get(
+                    CONF_STEERING_WHEEL_DURATION, DEFAULT_STEERING_WHEEL_DURATION
+                ),
+            ): minutes,
+            # Optional.  The SNCTSP platform addresses a car with this
+            # opaque token instead of the VIN, and the token is what carries
+            # the car's permissions, so it cannot be computed here.  Leave
+            # it empty to keep using an encrypted VIN (see README).
+            vol.Optional(
+                CONF_VEHICLE_TOKEN, default=current.get(CONF_VEHICLE_TOKEN, "")
+            ): str,
+            # GRIC channel only: the app's per-vehicle ``x-vehicle-identifier``.
+            # Vehicle lists work without it, but every read and every command
+            # is refused — so it is what turns a listing into control.
+            vol.Optional(
+                CONF_VEHICLE_IDENTIFIER,
+                default=current.get(CONF_VEHICLE_IDENTIFIER, ""),
+            ): str,
+        }
+        if full:
+            # Controls for hardware this particular car does not have (rear
+            # seat heaters…).  Nothing in the payload reveals it: the
+            # capability bitmap is per service rather than per seat, and a
+            # missing feature still reports a plain 0, so the owner has to
+            # say which ones to drop.
+            fields[
+                vol.Optional(
+                    CONF_HIDDEN_ENTITIES, default=_hidden_default(current)
+                )
+            ] = selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        selector.SelectOptionDict(value=key, label=label)
+                        for key, label in HIDABLE_ENTITIES.items()
+                    ],
+                    multiple=True,
+                    custom_value=False,
+                )
+            )
+        return vol.Schema(fields)
+
+
+def _hidden_default(current: dict[str, Any]) -> list[str]:
+    """The stored selection, minus keys this version no longer offers.
+
+    Dropping unknown keys keeps a renamed or retired option from turning into
+    an invalid selection the next time the form is saved.
+    """
+    raw = current.get(CONF_HIDDEN_ENTITIES)
+    if isinstance(raw, (list, tuple, set)):
+        return [str(item) for item in raw if str(item) in HIDABLE_ENTITIES]
+    return list(DEFAULT_HIDDEN_ENTITIES)
