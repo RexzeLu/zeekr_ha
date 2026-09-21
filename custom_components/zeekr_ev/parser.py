@@ -413,8 +413,15 @@ _ALIAS = {
     # blower, which on this platform only flips for the air-purification
     # (G-Clean) run.  An earlier revision read the blower first, so the AC showed
     # as off in Home Assistant even while it was running.
+    #
+    # ``climateStatus.activeStatus`` is deliberately *not* one of the aliases
+    # below: a real GRIC payload with the AC, the blower and the defrost *all*
+    # off still reports ``activeStatus: "1"``, so reading it pinned the climate
+    # entity to "on" forever.  It also silently outranked ``preClimateActive``:
+    # a dotted alias normalises to an exact full path, and those are resolved in
+    # the first pass — ahead of the leaf match a single-segment alias needs.
     "ac_on": ("preClimateActive", "acStatus", "acOn", "airConditionerStatus",
-              "airConStatus", "climateActive", "climateStatus.activeStatus"),
+              "airConStatus", "climateActive"),
     "blower": ("airBlowerActive", "blowerActive", "fanStatus"),
     "defrost": ("defrostStatus", "frontDefrostStatus", "climateStatus.defrost",
                 "defrost", "dfStatus"),

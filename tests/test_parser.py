@@ -435,6 +435,29 @@ def test_ac_on_reads_pre_climate_active_not_the_blower():
     assert data["climate"]["blower"] is False
 
 
+def test_ac_on_ignores_the_always_one_active_status():
+    """GRIC nests ``climateStatus`` at the top level, where ``activeStatus``
+    resolves in the *exact full path* pass and therefore outranks
+    ``preClimateActive`` — which is the flag the app actually uses.
+
+    A real parked car reported ``activeStatus: "1"`` with ``preClimateActive``,
+    ``airBlowerActive`` and ``defrost`` all false, so the climate entity sat on
+    "on" and never followed a change made on the phone.
+    """
+    payload = {
+        "climateStatus": {
+            "activeStatus": "1",
+            "preClimateActive": "false",
+            "airBlowerActive": "false",
+            "defrost": "false",
+            "currentTemperature": "28.0",
+        }
+    }
+    data = parser.normalize_vehicle_data(payload, {"vin": VIN_X})
+
+    assert data["climate"]["ac_on"] is False
+
+
 def test_ac_target_temperature_is_not_read_from_the_cloud():
     """The cloud answers a meaningless "0.0"; the entity keeps its own value."""
     payload = {
