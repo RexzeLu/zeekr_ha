@@ -429,6 +429,16 @@ class ZeekrEVOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
         if user_input is not None:
+            # Slider selectors hand back floats (5.0); every reader of these
+            # options expects whole minutes.
+            for key in (
+                CONF_POLLING_INTERVAL,
+                CONF_SEAT_DURATION,
+                CONF_AC_DURATION,
+                CONF_STEERING_WHEEL_DURATION,
+            ):
+                if user_input.get(key) is not None:
+                    user_input[key] = int(user_input[key])
             return self.async_create_entry(title="", data=user_input)
         return self.async_show_form(
             step_id="init", data_schema=self._options_schema()
@@ -451,17 +461,27 @@ class ZeekrEVOptionsFlow(config_entries.OptionsFlow):
 
     def _build_options_schema(self, *, full: bool = True) -> vol.Schema:
         current = {**self.config_entry.data, **self.config_entry.options}
-        minutes = vol.All(
-            vol.Coerce(int), vol.Range(min=MIN_DURATION, max=MAX_DURATION)
-        )
+
+        def minutes(minimum: int, maximum: int) -> selector.NumberSelector:
+            # A bare ``vol.Coerce(int) + vol.Range`` renders as HA's stripped
+            # slider-only form (no value box, label cramped against the
+            # track).  The standard NumberSelector lays out label, slider and
+            # the current value properly.  It yields floats, which
+            # ``async_step_init`` coerces back to int on save.
+            return selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=minimum,
+                    max=maximum,
+                    step=1,
+                    mode=selector.NumberSelectorMode.SLIDER,
+                )
+            )
+
         fields: dict[Any, Any] = {
             vol.Optional(
                 CONF_POLLING_INTERVAL,
                 default=current.get(CONF_POLLING_INTERVAL, DEFAULT_POLLING_INTERVAL),
-            ): vol.All(
-                vol.Coerce(int),
-                vol.Range(min=MIN_POLLING_INTERVAL, max=MAX_POLLING_INTERVAL),
-            ),
+            ): minutes(MIN_POLLING_INTERVAL, MAX_POLLING_INTERVAL),
             vol.Optional(
                 CONF_ENABLE_COMMANDS,
                 default=current.get(CONF_ENABLE_COMMANDS, DEFAULT_ENABLE_COMMANDS),
@@ -469,17 +489,17 @@ class ZeekrEVOptionsFlow(config_entries.OptionsFlow):
             vol.Optional(
                 CONF_SEAT_DURATION,
                 default=current.get(CONF_SEAT_DURATION, DEFAULT_SEAT_DURATION),
-            ): minutes,
+            ): minutes(MIN_DURATION, MAX_DURATION),
             vol.Optional(
                 CONF_AC_DURATION,
                 default=current.get(CONF_AC_DURATION, DEFAULT_AC_DURATION),
-            ): minutes,
+            ): minutes(MIN_DURATION, MAX_DURATION),
             vol.Optional(
                 CONF_STEERING_WHEEL_DURATION,
                 default=current.get(
                     CONF_STEERING_WHEEL_DURATION, DEFAULT_STEERING_WHEEL_DURATION
                 ),
-            ): minutes,
+            ): minutes(MIN_DURATION, MAX_DURATION),
             # Optional.  The SNCTSP platform addresses a car with this
             # opaque token instead of the VIN, and the token is what carries
             # the car's permissions, so it cannot be computed here.  Leave
