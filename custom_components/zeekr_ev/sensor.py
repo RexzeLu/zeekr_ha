@@ -118,9 +118,16 @@ def _build_specs() -> list[SensorSpec]:
             SensorDeviceClass.DURATION, SensorStateClass.MEASUREMENT,
             UnitOfTime.MINUTES, "mdi:timer-sand",
         ),
+        # Deliberately *not* ``SensorDeviceClass.BATTERY``: that class means
+        # "how much charge is left", and the front end uses it to pick the
+        # battery badge it draws on the device page.  With two battery-class
+        # sensors on one vehicle it picked this one, so the corner of the
+        # device page showed the charge target (90 %) instead of the actual
+        # state of charge.  The icon still says "charging limit"; only the
+        # class — which is what makes a number *the* battery — is dropped.
         SensorSpec(
             "charge_limit", "充电上限", ("battery", "limit"),
-            SensorDeviceClass.BATTERY, None,
+            None, None,
             PERCENTAGE, "mdi:battery-charging-high",
         ),
         # -- 12 V aux battery ------------------------------------------
