@@ -89,7 +89,15 @@ class ZeekrRefreshButton(ZeekrEntity, ButtonEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        return {"last_poll": self.coordinator.latest_poll_time}
+        # The interval is adaptive: a sleeping car backs it off, so "why has my
+        # change not shown up yet" is answered by looking here.
+        polling = self.coordinator.polling_info
+        return {
+            "last_poll": self.coordinator.latest_poll_time,
+            "poll_interval_minutes": polling.get("current_minutes"),
+            "poll_interval_max_minutes": polling.get("max_minutes"),
+            "unchanged_polls": polling.get("idle_polls"),
+        }
 
     async def async_press(self) -> None:
         await self.coordinator.async_force_discovery()

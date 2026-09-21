@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
@@ -33,6 +34,22 @@ def _phone_tail(entry: ConfigEntry) -> str | None:
     """Last four digits of the account phone — enough to spot duplicates."""
     digits = "".join(ch for ch in str(entry.data.get(CONF_PHONE) or "") if ch.isdigit())
     return digits[-4:] if len(digits) >= 4 else (digits or None)
+
+
+def _report_age(state: dict[str, Any]) -> float | None:
+    """Seconds between now and the car's own upload stamp (``updateTime``).
+
+    ``None`` when the channel does not carry one.  A big number is the car
+    sleeping, not a broken poll: the TSP only returns what the car uploaded.
+    """
+    stamp = state.get("report_time")
+    try:
+        millis = float(stamp)
+    except (TypeError, ValueError):
+        return None
+    if millis <= 0:
+        return None
+    return round(time.time() - millis / 1000.0, 1)
 
 
 def _describe_config_entries(
@@ -189,6 +206,13 @@ async def async_get_config_entry_diagnostics(
         "endpoint_probe": await _probe_endpoints(coordinator, data),
         "commands_enabled": coordinator.commands_enabled,
         "last_poll": coordinator.latest_poll_time,
+        # How stale the car's own upload stamp is.  ``updateTime`` only moves
+        # when the car reports, so a large age here is the car sleeping, not a
+        # polling problem — and it is what the adaptive backoff keys off.
+        "report_age_seconds": {
+            vin: _report_age(state) for vin, state in data.items()
+        },
+        "polling": coordinator.polling_info,
         # Values issued by a command but not yet confirmed by the car.  Handy
         # when a command "does not stick": if the entry is still here after the
         # TTL, the car never accepted (or never reported) the change.

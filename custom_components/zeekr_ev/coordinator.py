@@ -50,6 +50,7 @@ from .const import (
     DOMAIN,
 )
 from .optimistic import OptimisticStore, assign, dig
+from .polling import AdaptivePolling
 from .request_stats import ZeekrRequestStats
 
 _LOGGER = logging.getLogger(__name__)
@@ -76,12 +77,16 @@ class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self.request_stats = ZeekrRequestStats(hass)
         self.latest_poll_time: str | None = None
 
-        polling = self._option(CONF_POLLING_INTERVAL, DEFAULT_POLLING_INTERVAL)
+        polling = int(self._option(CONF_POLLING_INTERVAL, DEFAULT_POLLING_INTERVAL))
+        # A sleeping car keeps reporting the same payload for hours, so a fixed
+        # timer wasted ~1440 requests/day·car for a handful of real changes.
+        # The interval below is the *fast* one; see ``polling.AdaptivePolling``.
+        self._adaptive = AdaptivePolling(polling)
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=timedelta(minutes=int(polling)),
+            update_interval=timedelta(minutes=polling),
         )
 
         self._unsub_reset = async_track_time_change(
@@ -197,7 +202,32 @@ class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 )
         self.latest_poll_time = datetime.now().isoformat()
         self._async_persist_tokens()
+        self._apply_polling_interval(data)
         return self._optimistic.apply(data)
+
+    def _apply_polling_interval(self, data: dict[str, dict[str, Any]]) -> None:
+        """Stretch the interval while the car keeps saying the same thing.
+
+        ``update_interval`` is read when Home Assistant schedules the *next*
+        refresh, so mutating it here is enough; no rescheduling is needed.
+        Called before the optimistic overlay is re-applied so the fingerprint
+        reflects what the cloud actually returned.
+        """
+        minutes = self._adaptive.note_poll(
+            data, pending_optimistic=bool(self._optimistic.pending())
+        )
+        interval = timedelta(minutes=minutes)
+        if self.update_interval != interval:
+            _LOGGER.debug(
+                "轮询间隔 %s → %s 分钟（连续 %s 次无变化）",
+                self.update_interval, interval, self._adaptive.idle_polls,
+            )
+            self.update_interval = interval
+
+    @property
+    def polling_info(self) -> dict[str, Any]:
+        """Current backoff state, for diagnostics."""
+        return self._adaptive.as_dict()
 
     def _async_persist_tokens(self) -> None:
         """Store rotated gateway tokens back into the config entry.
@@ -221,6 +251,8 @@ class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
     async def async_force_discovery(self) -> None:
         """Re-query the vehicle list (used by the refresh service/button)."""
+        # The user asked for fresh data: give the car a fast window to answer.
+        self._adaptive.mark_command()
         await self.client.async_get_vehicle_list()
         await self.async_request_refresh()
 
@@ -281,6 +313,9 @@ class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         and report back; pass an explicit ``delay`` to poll just once.
         """
         self._cancel_scheduled_refreshes()
+        # Every command path funnels through here, so this is where the car is
+        # given a fast window to wake up and report the change back.
+        self._adaptive.mark_command()
         delays = (delay,) if delay is not None else getattr(
             self.client, "command_refresh_delays", COMMAND_REFRESH_DELAYS
         )
