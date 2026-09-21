@@ -470,6 +470,20 @@ def test_ac_target_temperature_is_not_read_from_the_cloud():
     assert data["climate"]["target_temp"] is None
 
 
+def test_climate_reports_when_the_car_uploaded_the_temperature():
+    """``temperatureUpdateTime`` is the only way to tell a stale upload from a
+    mis-read field: both make the setpoint look frozen in Home Assistant."""
+    payload = {
+        "climateStatus": {
+            "currentTemperature": "28.0",
+            "temperatureUpdateTime": 1789981366178,
+        }
+    }
+    data = parser.normalize_vehicle_data(payload, {"vin": VIN_X})
+
+    assert data["climate"]["temp_reported_at"] == 1789981366178
+
+
 def test_seat_heat_reads_the_level_field_the_car_actually_sends():
     """Seat heat arrives as ``*HeatLv``, not the ``*HeatSts`` we looked for.
 

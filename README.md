@@ -425,6 +425,20 @@ data:
 （它还会因为「点号别名归一后是完整路径、第一轮精确匹配就命中」而**压过**
 `preClimateActive`）。现已从别名表里移除。
 
+### 设定温度跟手机不一致
+
+空调实体上有三个属性专门用于定位这个问题，看一眼就能分清楚是谁的锅：
+
+| 属性 | 含义 |
+| --- | --- |
+| `car_target_temp` | 车端上报的设定温度（`currentTemperature`）；`null` = 车没报 |
+| `target_temp_source` | `car` = 用的是车端值；`local` = 车没报，回落到 HA 自己记的值 |
+| `car_temp_reported_at` | 车端**这份温度**的上传时间（`temperatureUpdateTime`） |
+
+判据：`car_temp_reported_at` 是**旧时间** ⇒ 车还没上传（车端休眠/省电，HA 再快也没用）；
+时间是新的、但 `car_target_temp` 跟手机不一样 ⇒ 字段读错了（换字段）；
+两者都对、只是慢 ⇒ 看「轮询」一节的自适应退避。
+
 ### 提示「The account is currently logged in elsewhere.」(079021)
 
 极氪的 SNCTSP 网关**每个账号只保留一个会话**：任何一次新的登录都会让上一个

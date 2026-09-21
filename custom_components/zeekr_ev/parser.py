@@ -23,6 +23,7 @@ Canonical shape (all keys always present, values may be ``None``)::
       "trips":    {"trip1", "trip2", "avg_speed"},
       "climate":  {"inside_temp", "outside_temp", "target_temp", "ac_on",
                    "blower", "defrost", "steering_wheel_heat",
+                   "temp_reported_at",
                    "curtain_open", "curtain_open_status", "curtain_pos",
                    "sunshade_supported",
                    "sunroof_open", "sunroof_pos", "sunroof_supported"},
@@ -409,6 +410,11 @@ _ALIAS = {
     # "0.0", which is meaningless rather than cold, so 0 is mapped to None below.
     "target_temp": ("currentTemperature", "temperatureSetting",
                     "targetTemperature", "acTemperature", "acTemprature"),
+    # When the car last uploaded the climate block.  Without it there is no way
+    # to tell "the car has not uploaded yet" apart from "the integration is not
+    # reading the value" — the two look identical from Home Assistant.
+    "temp_reported_at": ("climateStatus.temperatureUpdateTime",
+                         "temperatureUpdateTime"),
     # ``preClimateActive`` is the AC indicator; ``airBlowerActive`` is the cabin
     # blower, which on this platform only flips for the air-purification
     # (G-Clean) run.  An earlier revision read the blower first, so the AC showed
@@ -992,6 +998,7 @@ def normalize_vehicle_data(raw: Any, meta: dict[str, Any] | None = None) -> dict
         "outside_temp": as_float(_lookup(index, "outside_temp")),
         # 0.0 is the "no setpoint" sentinel, not a temperature.
         "target_temp": _positive_float(_lookup(index, "target_temp")),
+        "temp_reported_at": as_int(_lookup(index, "temp_reported_at")),
         "ac_on": as_bool(_lookup(index, "ac_on")),
         "blower": as_bool(_lookup(index, "blower")),
         "defrost": as_bool(_lookup(index, "defrost")),

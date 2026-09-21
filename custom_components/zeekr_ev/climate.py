@@ -15,6 +15,7 @@ from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.util import dt as dt_util
 
 from .const import DEFAULT_TARGET_TEMP, DOMAIN
 from .coordinator import ZeekrCoordinator
@@ -108,6 +109,19 @@ class ZeekrClimate(ZeekrEntity, ClimateEntity, RestoreEntity):
             return reported
         return self._attr_target_temperature
 
+    def _reported_at(self) -> str | None:
+        """When the car uploaded the climate block, as a local ISO timestamp."""
+        stamp = self.get("climate", "temp_reported_at")
+        try:
+            millis = int(stamp)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        if millis <= 0:
+            return None
+        return dt_util.as_local(
+            dt_util.utc_from_timestamp(millis / 1000)
+        ).isoformat(timespec="seconds")
+
     @property
     def min_temp(self) -> float:
         """Widen the floor if the car reports a setpoint below it."""
@@ -145,6 +159,10 @@ class ZeekrClimate(ZeekrEntity, ClimateEntity, RestoreEntity):
             # stops reporting one, the entity falls back to its own memory and
             # this says so, instead of the value just silently freezing.
             "car_target_temp": self._reported_target(),
+            # When the car last uploaded the climate block.  This is what tells
+            # "the car has not uploaded the new setpoint yet" apart from "the
+            # integration read the wrong field" — they look identical otherwise.
+            "car_temp_reported_at": self._reported_at(),
         }
         if self._reported_target() is None:
             attributes["target_temp_source"] = "local"
