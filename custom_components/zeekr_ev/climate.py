@@ -20,6 +20,7 @@ from homeassistant.util import dt as dt_util
 from .const import DEFAULT_TARGET_TEMP, DOMAIN
 from .coordinator import ZeekrCoordinator
 from .entity import VehicleEntityManager, ZeekrEntity
+from .parser import AC_HIGH_TEMP, AC_LOW_TEMP
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -62,6 +63,10 @@ class ZeekrClimate(ZeekrEntity, ClimateEntity, RestoreEntity):
     def __init__(self, coordinator: ZeekrCoordinator, vin: str) -> None:
         super().__init__(coordinator, vin, "climate")
         self._attr_target_temperature = DEFAULT_TARGET_TEMP
+        # Set only by :meth:`async_set_temperature`, i.e. by a value the user
+        # picked here.  A restored state does not count: see
+        # :meth:`target_temperature` for why that distinction matters.
+        self._user_setpoint = False
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
@@ -85,11 +90,17 @@ class ZeekrClimate(ZeekrEntity, ClimateEntity, RestoreEntity):
             return None
 
     def _reported_target(self) -> float | None:
-        """The setpoint the car itself reports, ``None`` when it has none.
+        """The setpoint the car uploads, ``None`` when it has none.
 
-        The cloud does hold it (``currentTemperature``), but answers ``"0.0"``
-        whenever the AC is off — which the parser maps to ``None`` rather than
-        to a 0 °C setpoint.
+        This is **the car's own setpoint, not the one remote commands use**:
+        a payload taken seconds after the phone had run the AC at LOW, at 23
+        and at HIGH in turn — with a fresh ``temperatureUpdateTime`` — still
+        reported ``currentTemperature: "28.0"``, while ``interiorTemp`` had
+        moved.  A remote setpoint is therefore written to the car but never
+        read back, so this value is only a starting point, never an override.
+
+        It also answers ``"0.0"`` whenever the AC is off, which the parser
+        maps to ``None`` rather than to a 0 °C setpoint.
         """
         reported = self.get("climate", "target_temp")
         try:
@@ -99,11 +110,16 @@ class ZeekrClimate(ZeekrEntity, ClimateEntity, RestoreEntity):
 
     @property
     def target_temperature(self) -> float | None:
-        """Prefer the setpoint the car reports, fall back to the last one used.
+        """What the AC will be started at.
 
-        Reading straight from local state instead made the entity show its own
-        stale default while the app showed the real setpoint.
+        A value the user picked here wins, because the car never echoes remote
+        setpoints back: preferring the uploaded one made a setpoint chosen in
+        Home Assistant snap back to the car's own 28 °C on the next poll, which
+        looked exactly like "the temperature never syncs".  Until the user
+        picks one, follow the car.
         """
+        if self._user_setpoint and self._attr_target_temperature is not None:
+            return self._attr_target_temperature
         reported = self._reported_target()
         if reported is not None:
             return reported
@@ -124,19 +140,25 @@ class ZeekrClimate(ZeekrEntity, ClimateEntity, RestoreEntity):
 
     @property
     def min_temp(self) -> float:
-        """Widen the floor if the car reports a setpoint below it."""
+        """Widen the floor to the App's ``LO`` end, and to whatever the car says.
+
+        The App's picker starts at 16 but has a non-numeric ``LO`` below it, so
+        a hard 16 floor made that end unreachable from Home Assistant.
+        """
         reported = self._reported_target()
-        if reported is not None and reported < BASE_MIN_TEMP:
+        floor = min(BASE_MIN_TEMP, AC_LOW_TEMP)
+        if reported is not None and reported < floor:
             return reported
-        return BASE_MIN_TEMP
+        return floor
 
     @property
     def max_temp(self) -> float:
-        """Widen the ceiling if the car reports a setpoint above it (31 °C)."""
+        """Widen the ceiling to the App's ``HI`` end (31 °C has been seen)."""
         reported = self._reported_target()
-        if reported is not None and reported > BASE_MAX_TEMP:
+        ceiling = max(BASE_MAX_TEMP, AC_HIGH_TEMP)
+        if reported is not None and reported > ceiling:
             return reported
-        return BASE_MAX_TEMP
+        return ceiling
 
     @property
     def hvac_mode(self) -> HVACMode | None:
@@ -168,8 +190,10 @@ class ZeekrClimate(ZeekrEntity, ClimateEntity, RestoreEntity):
             # integration read the wrong field" — they look identical otherwise.
             "car_temp_reported_at": self._reported_at(),
         }
-        if self._reported_target() is None:
+        if self._user_setpoint:
             attributes["target_temp_source"] = "local"
+        elif self._reported_target() is None:
+            attributes["target_temp_source"] = "default"
         else:
             attributes["target_temp_source"] = "car"
         return attributes
@@ -199,6 +223,9 @@ class ZeekrClimate(ZeekrEntity, ClimateEntity, RestoreEntity):
         if temperature is None:
             return
         self._attr_target_temperature = float(temperature)
+        # The car never echoes a remote setpoint back, so this is the only
+        # place the choice is recorded — and it now survives every poll.
+        self._user_setpoint = True
         # Show the new setpoint at once, and let the store take it back if the
         # car never confirms it.
         self.coordinator.set_optimistic(
