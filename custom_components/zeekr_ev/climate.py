@@ -20,7 +20,7 @@ from homeassistant.util import dt as dt_util
 from .const import DEFAULT_TARGET_TEMP, DOMAIN
 from .coordinator import ZeekrCoordinator
 from .entity import VehicleEntityManager, ZeekrEntity
-from .parser import AC_HIGH_TEMP, AC_LOW_TEMP
+from .parser import AC_HIGH_TEMP, AC_LOW_TEMP, PRESET_QUICK_COOL, PRESET_QUICK_HEAT, PRESET_STANDARD, preset_setpoint
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -53,7 +53,10 @@ class ZeekrClimate(ZeekrEntity, ClimateEntity, RestoreEntity):
 
     _attr_name = "空调"
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
-    _attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
+    _attr_supported_features = (
+        ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
+    )
+    _attr_preset_modes = [PRESET_STANDARD, PRESET_QUICK_COOL, PRESET_QUICK_HEAT]
     _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT_COOL]
     _attr_min_temp = BASE_MIN_TEMP
     _attr_max_temp = BASE_MAX_TEMP
@@ -168,6 +171,15 @@ class ZeekrClimate(ZeekrEntity, ClimateEntity, RestoreEntity):
         return HVACMode.HEAT_COOL if active else HVACMode.OFF
 
     @property
+    def preset_mode(self) -> str:
+        """Which of the App's quick modes is in effect.
+
+        Held on the coordinator so the 极速降温 / 极速升温 buttons and this
+        entity cannot disagree.
+        """
+        return self.coordinator.climate_preset(self.vin)
+
+    @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Surface the run time the next start will carry.
 
@@ -218,6 +230,27 @@ class ZeekrClimate(ZeekrEntity, ClimateEntity, RestoreEntity):
         else:
             _LOGGER.warning("不支持的空调模式: %s", hvac_mode)
 
+    async def async_set_preset_mode(self, preset_mode: str) -> None:
+        """Switch between the App's quick cool / quick heat and normal cooling.
+
+        What reaches the car is the setpoint at the end of the scale: the App's
+        buttons drive a cabin mode whose own command was never captured, and
+        the status payload does not report it either, so this cannot claim to
+        reproduce that mode — only its temperature half.
+        """
+        if preset_mode not in (PRESET_STANDARD, PRESET_QUICK_COOL,
+                               PRESET_QUICK_HEAT):
+            _LOGGER.warning("不支持的空调预设: %s", preset_mode)
+            return
+        setpoint = preset_setpoint(preset_mode)
+        if setpoint is not None:
+            # Show the end of the scale right away, and remember it as a user
+            # choice so the next poll cannot pull it back to the car's own value.
+            self._attr_target_temperature = setpoint
+            self._user_setpoint = True
+        await self.coordinator.async_set_climate_preset(self.vin, preset_mode)
+        self.async_write_ha_state()
+
     async def async_set_temperature(self, **kwargs: Any) -> None:
         temperature = kwargs.get("temperature")
         if temperature is None:
@@ -226,6 +259,8 @@ class ZeekrClimate(ZeekrEntity, ClimateEntity, RestoreEntity):
         # The car never echoes a remote setpoint back, so this is the only
         # place the choice is recorded — and it now survives every poll.
         self._user_setpoint = True
+        # Picking a number by hand is not a quick mode any more.
+        self.coordinator.note_climate_preset(self.vin, PRESET_STANDARD)
         # Show the new setpoint at once, and let the store take it back if the
         # car never confirms it.
         self.coordinator.set_optimistic(

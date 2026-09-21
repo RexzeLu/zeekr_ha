@@ -284,6 +284,39 @@ def _ac_setpoint(value: Any) -> float | None:
     return None
 
 
+# Climate presets.  The App has dedicated 极速制冷 / 极速制热 buttons, and the
+# car really does have a matching mode (the App calls it ``maxCooling`` /
+# ``maxWarming`` and pushes ``rapidCoolingActive`` for it), but the command that
+# enters that mode was never captured: the only climate command seen on the
+# wire — both in our own capture and in every community integration — is
+# ``serviceId: ZAF`` with ``AC`` / ``AC.temp`` / ``AC.duration``.
+#
+# So a preset is expressed the only way that *is* verified: by pushing the
+# setpoint to the end of the scale.  The cabin mode itself (blower to full and
+# friends) is not something this command can ask for, and the status payload
+# does not carry it either — see ``preset_setpoint``.
+PRESET_STANDARD = "standard"
+PRESET_QUICK_COOL = "quick_cool"
+PRESET_QUICK_HEAT = "quick_heat"
+PRESETS = (PRESET_STANDARD, PRESET_QUICK_COOL, PRESET_QUICK_HEAT)
+
+
+def preset_setpoint(preset: str | None) -> float | None:
+    """The setpoint a climate preset maps onto, ``None`` for "leave it alone".
+
+    ``quick_cool`` / ``quick_heat`` resolve to the two ends of the App's scale
+    (``LO`` / ``HI``).  ``standard`` deliberately returns ``None``: it means
+    "use whatever is already on display", because the car holds its own
+    setpoint and overwriting it with a constant is what made a phone-chosen
+    temperature snap back to 22 on the next poll.
+    """
+    if preset == PRESET_QUICK_COOL:
+        return AC_LOW_TEMP
+    if preset == PRESET_QUICK_HEAT:
+        return AC_HIGH_TEMP
+    return None
+
+
 _TRUE_TOKENS = {"1", "true", "on", "yes", "open", "opened", "active", "running",
                 "locked", "armed", "engine_on"}
 _FALSE_TOKENS = {"0", "2", "false", "off", "no", "close", "closed", "inactive",

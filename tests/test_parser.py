@@ -562,3 +562,18 @@ def test_report_time_exposes_when_the_car_last_uploaded():
     data = parser.normalize_vehicle_data(payload, {"vin": VIN_X})
 
     assert data["report_time"] == "1789922460649"
+
+
+def test_climate_presets_map_onto_the_ends_of_the_scale():
+    """The App's quick cool / quick heat, expressed as a setpoint.
+
+    Their own command was never captured, so a preset can only push the
+    setpoint to the end of the scale.  standard must stay out of the way:
+    it means "use whatever the car already shows", and sending a constant
+    there is what made a phone-chosen temperature snap back.
+    """
+    assert parser.preset_setpoint(parser.PRESET_QUICK_COOL) == parser.AC_LOW_TEMP
+    assert parser.preset_setpoint(parser.PRESET_QUICK_HEAT) == parser.AC_HIGH_TEMP
+    assert parser.preset_setpoint(parser.PRESET_STANDARD) is None
+    assert parser.preset_setpoint(None) is None
+    assert parser.preset_setpoint("something-else") is None

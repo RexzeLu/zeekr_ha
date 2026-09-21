@@ -50,6 +50,7 @@ from .const import (
     DOMAIN,
 )
 from .optimistic import OptimisticStore, assign, dig
+from .parser import PRESET_STANDARD, PRESETS, preset_setpoint
 from .polling import AdaptivePolling
 from .request_stats import ZeekrRequestStats
 
@@ -98,6 +99,10 @@ class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self._optimistic = OptimisticStore()
         # Set by the number entity; falls back to the stored option.
         self._ac_duration_override: int | None = None
+        # Last climate preset chosen, per VIN.  Kept here so the button and the
+        # climate entity agree: pressing "极速降温" has to show up as the
+        # entity's preset, not silently disagree with it.
+        self._climate_preset: dict[str, str] = {}
 
     # -- options ----------------------------------------------------------
 
@@ -346,6 +351,34 @@ class ZeekrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         except (TypeError, ValueError):
             return DEFAULT_TARGET_TEMP
         return value if value > 0 else DEFAULT_TARGET_TEMP
+
+    def climate_preset(self, vin: str) -> str:
+        """The climate preset last chosen for this car, ``standard`` by default."""
+        return self._climate_preset.get(vin, PRESET_STANDARD)
+
+    def note_climate_preset(self, vin: str, preset: str) -> None:
+        """Record a preset without sending anything (used when a temperature
+        is picked by hand, which means "no longer a quick cool/heat")."""
+        if preset in PRESETS:
+            self._climate_preset[vin] = preset
+
+    async def async_set_climate_preset(self, vin: str, preset: str) -> dict[str, Any]:
+        """Start the cabin AC in one of the App's quick modes.
+
+        Only the two ends of the temperature scale are verifiable — see
+        :func:`~.parser.preset_setpoint` — so that is what gets sent, and the
+        car's own quick-cool mode (blower to full and friends) is *not*
+        claimed to be reproduced.
+        """
+        if preset not in PRESETS:
+            preset = PRESET_STANDARD
+        self._climate_preset[vin] = preset
+        temperature = preset_setpoint(preset)
+        if temperature is None:
+            temperature = self._sane_target_temp(vin)
+        return await self.async_set_climate(
+            vin, enabled=True, temperature=temperature
+        )
 
     async def async_set_climate(self, vin: str, *, enabled: bool = True,
                                 temperature: float | None = None,

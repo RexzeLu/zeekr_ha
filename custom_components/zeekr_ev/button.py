@@ -13,6 +13,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import DOMAIN
 from .coordinator import ZeekrCoordinator
 from .entity import VehicleEntityManager, ZeekrEntity
+from .parser import PRESET_QUICK_COOL, PRESET_QUICK_HEAT
 
 
 @dataclass(frozen=True)
@@ -20,9 +21,11 @@ class ButtonSpec:
     key: str
     name: str
     icon: str
-    command: str
-    service_id: str
-    setting: dict[str, Any]
+    command: str = ""
+    service_id: str = ""
+    setting: dict[str, Any] | None = None
+    # Either a raw remote command (above), or one of the App's climate presets.
+    preset: str | None = None
 
 
 BUTTON_SPECS: tuple[ButtonSpec, ...] = (
@@ -41,6 +44,13 @@ BUTTON_SPECS: tuple[ButtonSpec, ...] = (
         "stop", "PCM",
         {"serviceParameters": [{"key": "parking_comfortable", "value": "false"}]},
     ),
+    # The App's 极速制冷 / 极速制热.  Their own command was never captured, so
+    # these push the setpoint to the end of the scale — see
+    # ``parser.preset_setpoint``.
+    ButtonSpec("quick_cool", "极速降温", "mdi:snowflake",
+               preset=PRESET_QUICK_COOL),
+    ButtonSpec("quick_heat", "极速升温", "mdi:heat-wave",
+               preset=PRESET_QUICK_HEAT),
 )
 
 
@@ -73,8 +83,13 @@ class ZeekrCommandButton(ZeekrEntity, ButtonEntity):
         self._spec = spec
 
     async def async_press(self) -> None:
+        if self._spec.preset is not None:
+            await self.coordinator.async_set_climate_preset(
+                self.vin, self._spec.preset
+            )
+            return
         await self.send_command(
-            self._spec.command, self._spec.service_id, self._spec.setting
+            self._spec.command, self._spec.service_id, self._spec.setting or {}
         )
 
 
