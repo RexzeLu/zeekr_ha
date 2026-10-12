@@ -8,7 +8,9 @@
 
 用法：
     python tools/zeekr_device_pull.py                 # 全流程：拉取 + 解包 + 扫描
-    python tools/zeekr_device_pull.py --scan-only DIR # 只扫描已解包的目录
+    python tools/zeekr_device_pull.py --gric          # 额外抠出最新的一对 GRIC 令牌（脱敏打印）
+    python tools/zeekr_device_pull.py --gric --write-tokens   # 并写进工具链的令牌文件（自动备份）
+    python tools/zeekr_device_pull.py --scan-only DIR --gric  # 只扫描已解包目录并取令牌
     python tools/zeekr_device_pull.py --clean         # 清理设备上的临时 tar
 """
 
@@ -19,6 +21,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -177,6 +180,108 @@ def decode_jwt(tok: bytes) -> dict:
         return {}
 
 
+GRIC_KEYS = (b"MODULE_LOGIN_ACCESS_TOKEN", b"MODULE_LOGIN_REFRESH_TOKEN")
+
+
+def _jwt_iat(tok: bytes) -> int:
+    try:
+        parts = tok.decode("ascii", "replace").split(".")
+        payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+        return int(payload.get("iat") or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def find_gric_tokens(root_dir: Path) -> dict:
+    """从 App 数据里挑出**最新**的一对 GRIC 令牌。
+
+    登录态存在 ``files/mmkv/MOD_LOGIN``（键 ``MODULE_LOGIN_ACCESS_TOKEN`` /
+    ``MODULE_LOGIN_REFRESH_TOKEN``）。MMKV 是 **append-only** 日志，同一个键会出现
+    多次，**必须按 ``iat`` 取最新** —— 否则会拿回一条已被轮换作废的旧令牌，
+    表现为「刚取的值一刷新就 1018P061 已过期」。
+    """
+    best: dict[str, tuple[int, str]] = {}
+    where = ""
+    for path in sorted(root_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            if path.stat().st_size > MAX_READ:
+                continue
+            data = path.read_bytes()
+        except OSError:
+            continue
+        if not any(k in data for k in GRIC_KEYS):
+            continue
+        for m in RE_JWT.finditer(data):
+            tok = m.group(0).decode("ascii", "replace")
+            kind = "access" if len(tok) > 1000 else "refresh"
+            iat = _jwt_iat(m.group(0))
+            if kind not in best or iat > best[kind][0]:
+                best[kind] = (iat, tok)
+                where = str(path.relative_to(root_dir))
+    return {
+        "access": best.get("access", (0, ""))[1],
+        "refresh": best.get("refresh", (0, ""))[1],
+        "where": where,
+    }
+
+
+def write_gric_tokens(refresh: str, access: str, source: str) -> list[str]:
+    """把这对令牌写进工具链的两份令牌文件（各自先备份）。"""
+    targets = [
+        os.path.join(tempfile.gettempdir(), "zeekr_gric_tokens.json"),
+        "C:/Users/rexze/Documents/OPPO 互联/zeekr_gric_tokens.json",
+    ]
+    written: list[str] = []
+    for target in dict.fromkeys(targets):
+        try:
+            data: dict = {}
+            if os.path.exists(target):
+                shutil.copyfile(target, target + ".bak-" + time.strftime("%Y%m%d-%H%M%S"))
+                with open(target, encoding="utf-8") as fh:
+                    data = json.load(fh)
+            data["gric_access"] = access
+            data["gric_refresh"] = refresh
+            data["captured_from"] = source
+            data["captured_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            tmp = target + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp, target)
+            written.append(target)
+        except OSError as exc:
+            print(f"  [warn] 写入失败 {target}: {exc}", file=sys.stderr)
+    return written
+
+
+def report_gric(info: dict, write: bool) -> None:
+    """脱敏打印取到的令牌；``write`` 时顺带写进令牌文件。"""
+    access = info.get("access") or ""
+    refresh = info.get("refresh") or ""
+    if not access and not refresh:
+        print("  （未找到 GRIC 令牌：App 可能没登录，或登录态不在 mmkv/MOD_LOGIN 里）")
+        return
+    for label, tok in (("access", access), ("refresh", refresh)):
+        if not tok:
+            print(f"  {label:<8} 缺失")
+            continue
+        meta = decode_jwt(tok.encode())
+        left = ""
+        exp = meta.get("exp")
+        if isinstance(exp, int):
+            days = (exp - time.time()) / 86400
+            left = f"剩余 {days:.2f} 天" + ("" if days > 0 else "  ❌ 已过期")
+        print(f"  {label:<8} {tok[:14]}…({len(tok)})  {left}  到期 {meta.get('exp_readable')}")
+    print(f"  来源 {info.get('where') or '?'}（同键多次出现时按 iat 取最新）")
+    if write:
+        source = f"phone mmkv MOD_LOGIN @{time.strftime('%Y-%m-%d %H:%M')}"
+        for target in write_gric_tokens(refresh, access, source):
+            print(f"  ✔ 已写入 {target}")
+    else:
+        print("  （只读：要写进令牌文件请加 --write-tokens）")
+
+
 def scan(root_dir: Path, report: Path) -> dict:
     findings: dict[str, list[str]] = {"jwt": [], "hex32": [], "hex40": [], "keywords": []}
     jwt_seen: dict[str, dict] = {}
@@ -272,6 +377,10 @@ def main() -> int:
     ap.add_argument("--scan-only", metavar="DIR", help="跳过拉取，扫描已解包的目录")
     ap.add_argument("--from-tar", metavar="TAR", help="跳过拉取，直接解包并扫描既有的 tar.gz")
     ap.add_argument("--clean", action="store_true", help="只清理设备上的临时 tar 后退出")
+    ap.add_argument("--gric", action="store_true",
+                    help="额外提取 App 里最新的一对 GRIC 令牌（脱敏打印，按 iat 取最新）")
+    ap.add_argument("--write-tokens", action="store_true",
+                    help="配合 --gric：把提取到的令牌写进工具链的令牌文件（写入前自动备份）")
     args = ap.parse_args()
 
     if args.clean:
@@ -288,6 +397,9 @@ def main() -> int:
             raise SystemExit(f"目录不存在: {d}")
         res = scan(d, d / "scan_report.txt")
         print("\n".join(res["report"]))
+        if args.gric or args.write_tokens:
+            print("\n== GRIC 令牌（取最新） ==")
+            report_gric(find_gric_tokens(d), args.write_tokens)
         return 0
 
     if args.from_tar:
@@ -341,6 +453,11 @@ def main() -> int:
     print("\n".join(res["report"]))
     print(f"\n报告已写入: {out_dir / 'scan_report.txt'}")
     print(f"原始数据目录: {data_dir}")
+
+    if args.gric or args.write_tokens:
+        print("\n== GRIC 令牌（取最新） ==")
+        report_gric(find_gric_tokens(data_dir), args.write_tokens)
+
     print(f"（清理设备临时文件：python tools/zeekr_device_pull.py --clean）")
     return 0
 

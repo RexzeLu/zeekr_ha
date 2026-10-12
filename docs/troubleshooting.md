@@ -121,6 +121,24 @@ GRIC 重试间隔更宽（10/30/60/120/170 秒）—— 中台唤醒并回报实
 `User-Agent`、`Content-Type` 空格、nonce 带横线 UUID、登录不带 `Authorization` 但带 `X-VIN`、
 query 的 `*`→`%2A`）。仍失败时看诊断 `gateways.gw3_last_rejected`。
 
+## 短信通道为什么控不了车（2026-10-12 复核）
+
+用户实测：**用车主账号 + 短信验证码登录，HA 里点开关「没反应，车不动」**。复核结论 ——
+**这不是账号问题，是这条通道本身**：
+
+| 证据 | 内容 |
+| --- | --- |
+| App 本地存储 | 只有 GRIC 令牌（`files/mmkv/MOD_LOGIN` 里 `aud/azp = auth_client_zeekr_phone`，iss `gric-mid-inner.geely.com`），**没有任何 SNC 的 `user_center_client_phone` 令牌** ⇒ 新版 App 控车走的就是 GRIC，SNC 那条腿已被厂商弃用 |
+| GW3 门禁矩阵（09-18 实测） | 同一份 GW3 令牌下：控制类（`/ms-remote-control/.../control`）与车况类（`/ms-vehicle-status/...`）一律 `079001 [SDK]此接口未被授权`；查询类（`.../queryProcessResult`、`/ms-user-auth/...`）放行 ⇒ **门禁按接口粒度，不看账号是不是车主、也不看 `X-VIN` / `serviceParameters`** |
+| 兜底管道 | GW2 `PUT /remote-control/vehicle/telematics/{VIN}` 回 `1000 操作成功` 但**车不动**（集成里这条被标记为 `degraded`，见 `api_sms.py` 的 `async_do_remote_control`） |
+
+⇒ 短信通道的定位就是**只读**（车况经 GW2 正常）；**控车一律走 GRIC**，车主账号与
+非车主账号没有区别：同一账号在 App 里取一次 `refreshToken` 即可（`x-vehicle-identifier`
+是**按车**的，换账号时沿用原值即可，集成会在创建配置项前实测一次来确认）。
+
+复现/取证：`tools/zeekr_gate_check.py`（全只读探针，会逐条打出网关应答，
+`--save docs/zeekr_gate_baseline.json` / `--compare` 可对比门禁是否变化）。
+
 ## GRIC 报错码
 
 | 码 | 含义 |
