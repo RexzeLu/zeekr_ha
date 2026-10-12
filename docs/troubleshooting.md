@@ -139,6 +139,19 @@ query 的 `*`→`%2A`）。仍失败时看诊断 `gateways.gw3_last_rejected`。
 复现/取证：`tools/zeekr_gate_check.py`（全只读探针，会逐条打出网关应答，
 `--save docs/zeekr_gate_baseline.json` / `--compare` 可对比门禁是否变化）。
 
+## 两个接入值分别能从哪儿拿到（2026-10-12 复核）
+
+| 值 | 手机存储里有吗 | 结论 |
+| --- | --- | --- |
+| `refreshToken` / `gric_access` | **有**：`files/mmkv/MOD_LOGIN` 的 `MODULE_LOGIN_{ACCESS,REFRESH}_TOKEN`（mmkv 是 append 日志，取 `iat` 最大的那条才是最新） | root 手机 `tools/zeekr_device_pull.py --gric --write-tokens` 可只读取出 → `tools/zeekr_gric_token.py form` 导出 |
+| `x-vehicle-identifier` | **没有**：把整份 App 私有目录（mmkv / shared_prefs / 日志 / cache）逐字节搜该值、以及 `vehicle-identifier` / `x-vehicle` 等头名，**命中 0** | 只在 App 运行内存里现算（密钥在原生库里运行时装配）⇒ **只能从真实请求头里抄**，或内存取证 |
+
+`x-vehicle-identifier` 结构：44 字符 base64 = 32 字节，= AES 两个块的密文；用 `vin_key`/`vin_iv`、
+`prod_secret`、`_SNC_SECRET` 的各种派生（ECB / CBC、多种 IV）解**全为乱码**（2026-10-12 复测），
+**不要**再指望离线算出来或从 APK 静态提取（`GEELYCNCH001M0001` 的密钥也不在包里）。
+
+⇒ README 的取值章节按「抓包一次拿全两个值」为主线写；root 路线只承诺 `refreshToken`。
+
 ## GRIC 报错码
 
 | 码 | 含义 |
@@ -167,5 +180,6 @@ query 的 `*`→`%2A`）。仍失败时看诊断 `gateways.gw3_last_rejected`。
 `tools/zeekr_gric_verify.py` 只读探针（打印车辆列表/车况）·
 `tools/zeekr_gric_control.py` 真车车控（裸跑只列命令表，有安全门）·
 `tools/zeekr_gric_token.py` 令牌 `show/refresh/ensure` + `form`（导出表单两值）·
-`tools/zeekr_device_pull.py` root 手机只读拉取（不触发重登）·
+`tools/zeekr_device_pull.py` root 手机只读拉取（不触发重登；`--gric` 打印最新一对 GRIC 令牌、
+`--write-tokens` 写入令牌文件）·
 `tools/hexgrep.sh` 内存 hex 搜索 · `tools/generate_brand_images.py` 生成 brand 图标。

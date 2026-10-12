@@ -2,11 +2,15 @@
 
 The first step picks the channel; everything after it is channel specific.
 
-* **SMS (+86)** — the classic login.  Works for the car's *owner* and needs the
-  phone number plus a verification code.
-* **GRIC** — seeded with the app's own refresh token.  This is the channel for
-  an account the SNC gateway refuses, such as a shared car
-  (``isOwner: false``), which cannot be fixed by logging in differently.
+* **SMS (+86)** — the classic login (phone number + verification code).  It is
+  **read-only**: the gateway refuses every command interface for this token
+  generation with ``079001``, and the legacy fallback pipe answers "success"
+  without executing anything.  It is *not* limited to non-owner accounts —
+  logging in as the car's owner over SMS fails exactly the same way, which is
+  why the channel picker says so out loud.
+* **GRIC** — seeded with the app's own refresh token; this is the only channel
+  that can drive the car (status *and* commands), and the one the app itself
+  uses.  Both values it needs come from the app on a phone (see the README).
 
 The GRIC step also asks for the car's ``x-vehicle-identifier``: the gateway
 decrypts it, so it cannot be derived offline and has to be pasted from the app
@@ -66,8 +70,8 @@ REGIONS = ["+86", "+852", "+853", "+886"]
 #: are written here rather than in the translations file (a ``vol.In(dict)``
 #: shows its values, not a translatable key).
 LOGIN_METHODS = {
-    AUTH_METHOD_SMS: "短信验证码登录（车主账号）",
-    AUTH_METHOD_GRIC: "GRIC 令牌（共享车 / 非车主账号）",
+    AUTH_METHOD_SMS: "短信验证码（只能看车辆状态，不能控车）",
+    AUTH_METHOD_GRIC: "GRIC 令牌（看状态 + 控车，推荐）",
 }
 
 
@@ -441,7 +445,25 @@ class ZeekrEVOptionsFlow(config_entries.OptionsFlow):
                     user_input[key] = int(user_input[key])
             return self.async_create_entry(title="", data=user_input)
         return self.async_show_form(
-            step_id="init", data_schema=self._options_schema()
+            step_id="init",
+            data_schema=self._options_schema(),
+            description_placeholders={"channel_hint": self._channel_hint()},
+        )
+
+    def _channel_hint(self) -> str:
+        """One line saying what this entry's channel can actually do.
+
+        The SMS channel cannot send a single command — the gateway refuses
+        every command interface for that token generation (``079001``) — so
+        offering "allow commands" without saying so reads as a working switch
+        that mysteriously does nothing.
+        """
+        if _entry_auth_method(self.config_entry) == AUTH_METHOD_GRIC:
+            return "当前配置项使用 GRIC 令牌通道：可以读取车辆状态，也可以下发控制指令。"
+        return (
+            "⚠️ 当前配置项使用短信验证码通道：只能读取车辆状态，不能控车 —— "
+            "下发指令的接口会被网关拒绝（079001），所以下面的「允许下发控制指令」"
+            "对它无效。需要控车请改用 GRIC 令牌通道。"
         )
 
     def _options_schema(self) -> vol.Schema:

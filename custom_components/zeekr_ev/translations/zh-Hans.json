@@ -3,14 +3,14 @@
     "step": {
       "user": {
         "title": "极氪账号接入方式",
-        "description": "请选择本配置项使用的登录通道。\n{detail}",
+        "description": "请选择本配置项使用的登录通道 —— **这决定了能不能控车**：\n\n- **短信验证码（+86）**：只能**查看车辆状态**（电量 / 续航 / 位置 / 门锁车窗状态…），**不能控车**。下发指令的接口会被网关按接口粒度拒绝（`079001`），兜底的老管道会回「操作成功」却不会执行，车主账号也一样。\n- **GRIC 令牌**：**既能看状态，也能控车**（空调 / 锁车 / 车窗 / 闪灯…），和手机 App 走同一条通道。需要从 App 取两个值，取法见 README「怎么取这两个值」。\n\n{detail}",
         "data": {
           "auth_method": "接入方式"
         }
       },
       "phone": {
-        "title": "极氪账号登录",
-        "description": "请输入极氪 App 注册的手机号，我们会向该号码发送短信验证码。\n{detail}",
+        "title": "极氪账号登录（只读通道）",
+        "description": "⚠️ **这条通道只能查看车辆状态，不能控车** —— 网关会拒绝该令牌代际的所有指令接口（`079001`），车主账号也一样。要控车请退出本向导，改选「GRIC 令牌」。\n\n请输入极氪 App 注册的手机号，我们会向该号码发送短信验证码。\n{detail}",
         "data": {
           "region_code": "国家/地区代码",
           "phone": "手机号"
@@ -18,14 +18,14 @@
       },
       "sms_code": {
         "title": "输入短信验证码",
-        "description": "验证码已发送至 {phone}。\n{detail}",
+        "description": "验证码已发送至 {phone}。\n登录成功后本集成只能读取车辆状态，不能控车。\n{detail}",
         "data": {
           "sms_code": "短信验证码"
         }
       },
       "gric": {
-        "title": "GRIC 令牌接入",
-        "description": "适用于共享车 / 非车主账号（此类账号走短信通道会被网关拒绝）。\n请粘贴极氪 App 的 refreshToken；集成会用它自动续期，之后不再需要手机。\n注意：同一会话只有最后持有者有效，令牌轮换后 App 需要重新登录。\n{detail}",
+        "title": "GRIC 令牌接入（可看状态 + 控车）",
+        "description": "这条通道可以读取车辆状态，也可以下发控制指令。需要两个值，都取自**同一台手机上、同一个能控车的极氪 App**：\n\n1. **refreshToken** —— App 请求 `POST gric-api.geely.com/ms-midground-user/api/v1.0/user/auth/refresh/token` 的**响应体**里 `data.refreshToken`（约 900 字符的 JWT，以 `eyJ` 开头；别抄成更长的 `accessToken`）。\n2. **x-vehicle-identifier** —— 任意一条 `gric-*.geely.com` 请求的**请求头**里那个 44 字符、以 `=` 结尾的 base64。它只在 App 运行内存里生成，手机存储里没有、也无法离线算出来。\n\n取法（抓包 App / mitmproxy / root 手机，含逐步操作）见 README「怎么取这两个值」。\n注意：令牌是单会话的 —— 保存后 HA 会用它换一对新令牌，手机上这个会话会掉线，属正常现象。\n{detail}",
         "data": {
           "gric_refresh_token": "refreshToken",
           "vehicle_identifier": "车辆 x-vehicle-identifier（必填，见 README）"
@@ -43,7 +43,7 @@
       "sms_failed": "验证码发送失败：{detail}",
       "invalid_auth": "登录失败：{detail}",
       "gric_token_required": "请粘贴 refreshToken",
-      "gric_identifier_required": "请填写车辆的 x-vehicle-identifier（取法见 README）",
+      "gric_identifier_required": "请填写车辆的 x-vehicle-identifier（取法见 README「怎么取这两个值」）",
       "gric_refresh_failed": "refreshToken 无效或被拒绝：{detail}",
       "gric_identifier_failed": "车辆标识校验失败：{detail}",
       "unknown": "未知错误"
@@ -57,6 +57,7 @@
     "step": {
       "init": {
         "title": "极氪集成选项",
+        "description": "{channel_hint}",
         "data": {
           "polling_interval": "轮询间隔（分钟）",
           "enable_commands": "允许下发控制指令",

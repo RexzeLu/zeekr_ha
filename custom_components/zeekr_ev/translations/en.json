@@ -3,14 +3,14 @@
     "step": {
       "user": {
         "title": "Zeekr account access",
-        "description": "Choose the login channel this config entry should use.\n{detail}",
+        "description": "Choose the login channel for this config entry — **this decides whether the car can be controlled**:\n\n- **SMS verification code (+86)**: **vehicle status only** (battery, range, location, lock/door state…). **No control** — the gateway refuses every command interface for this token generation (`079001`), and the legacy fallback pipe answers \"success\" without executing anything. Logging in as the car's owner makes no difference.\n- **GRIC token**: **status *and* control** (climate, locks, windows, flash/horn…), the same channel the mobile app itself uses. Needs two values taken from the app — see the README section \"How to obtain both values\".\n\n{detail}",
         "data": {
           "auth_method": "Login channel"
         }
       },
       "phone": {
-        "title": "Zeekr account login",
-        "description": "Enter the phone number registered with the Zeekr app. An SMS verification code will be sent to it.\n{detail}",
+        "title": "Zeekr account login (read-only channel)",
+        "description": "⚠️ **This channel can only read vehicle status — it cannot control the car.** The gateway rejects every command interface for this token generation (`079001`), for the owner account as well. To control the car, go back and pick \"GRIC token\" instead.\n\nEnter the phone number registered with the Zeekr app. An SMS verification code will be sent to it.\n{detail}",
         "data": {
           "region_code": "Country / region code",
           "phone": "Phone number"
@@ -18,14 +18,14 @@
       },
       "sms_code": {
         "title": "Enter verification code",
-        "description": "A verification code was sent to {phone}.\n{detail}",
+        "description": "A verification code was sent to {phone}.\nOnce signed in, this integration can only read vehicle status — not control the car.\n{detail}",
         "data": {
           "sms_code": "SMS verification code"
         }
       },
       "gric": {
-        "title": "GRIC token access",
-        "description": "For a shared car or a non-owner account, which the SMS channel's gateway refuses.\nPaste the refreshToken from the Zeekr app; the integration renews it automatically and never needs the phone again.\nNote: only the last holder of a session stays valid, so the app has to log in again after a rotation.\n{detail}",
+        "title": "GRIC token access (status + control)",
+        "description": "This channel can read vehicle status *and* send control commands. It needs two values, both taken from **the same controllable Zeekr app session on one phone**:\n\n1. **refreshToken** — from the **response body** of the app's `POST gric-api.geely.com/ms-midground-user/api/v1.0/user/auth/refresh/token`, field `data.refreshToken` (a ~900-character JWT starting with `eyJ`; do not paste the longer `accessToken`).\n2. **x-vehicle-identifier** — the 44-character base64 (ends with `=`) in the **request headers** of any `gric-*.geely.com` request. It is computed inside the app's runtime only: it is not stored on the phone and cannot be derived offline.\n\nStep-by-step capture instructions (capture app / mitmproxy / rooted phone) are in the README section \"How to obtain both values\".\nNote: tokens are single-session — once saved, Home Assistant exchanges them for a new pair and the phone session is signed out. That is expected.\n{detail}",
         "data": {
           "gric_refresh_token": "refreshToken",
           "vehicle_identifier": "Vehicle x-vehicle-identifier (required, see README)"
@@ -43,7 +43,7 @@
       "sms_failed": "Could not send the verification code: {detail}",
       "invalid_auth": "Login failed: {detail}",
       "gric_token_required": "Please paste the refreshToken",
-      "gric_identifier_required": "Please enter the vehicle's x-vehicle-identifier (see README)",
+      "gric_identifier_required": "Please enter the vehicle's x-vehicle-identifier (see the README section \"How to obtain both values\")",
       "gric_refresh_failed": "The refreshToken was rejected or has expired: {detail}",
       "gric_identifier_failed": "Vehicle identifier rejected: {detail}",
       "unknown": "Unexpected error"
@@ -57,6 +57,7 @@
     "step": {
       "init": {
         "title": "Zeekr integration options",
+        "description": "{channel_hint}",
         "data": {
           "polling_interval": "Polling interval (minutes)",
           "enable_commands": "Allow sending control commands",
